@@ -1,7 +1,14 @@
 # models/headline.py
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text
-from datetime import datetime, timezone
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Float,
+    DateTime,
+    Text,
+)
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from database.base import Base
@@ -22,12 +29,36 @@ class Headline(Base):
 
     sentiment_score = Column(Float)
 
-    published_at = Column(DateTime(timezone=True), default=
-                          lambda: datetime.now(ZoneInfo("Africa/Nairobi")))
+    published_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(
+            ZoneInfo("Africa/Nairobi")
+        )
+    )
 
-    keyword_detected = Column(String(255))
+
+    # New intelligence fields
+    keywords_detected = Column(Text, nullable=True)
+
+    categories = Column(Text, nullable=True)
+
+    matched_keywords_count = Column(
+        Integer,
+        default=0,
+        nullable=False
+    )
+
+    impact_score = Column(
+        Integer,
+        default=0,
+        nullable=False
+    )
 
     url = Column(String(1000), nullable=False)
 
-    timestamp = Column(DateTime(timezone=True), 
-                       default=lambda: datetime.now(ZoneInfo("Africa/Nairobi")))
+    timestamp = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(
+            ZoneInfo("Africa/Nairobi")
+        )
+    )

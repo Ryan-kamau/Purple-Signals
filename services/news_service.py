@@ -1,15 +1,26 @@
 """
+services/news_service.py
+
 Business service for NewsAPI-backed headline ingestion.
 
-This module sits above news_fetcher.py. It owns validation, normalization,
-duplicate prevention, ORM object construction, and persistence. It intentionally
-does not contain FastAPI routes, HTTP fetch logic, raw SQL, sentiment analysis,
-NLP, or analytics logic.
+Pipeline position:
+    news_fetcher.py  →  keyword_engine.py  →  news_service.py  →  DB  →  API
 
-Expected project dependencies:
-    - services.news_fetcher.NewsFetcher
-    - SQLAlchemy SessionLocal
-    - SQLAlchemy ORM model: Headline
+Responsibilities:
+  - Accept raw articles from NewsFetcher
+  - Run KeywordEngine enrichment (keywords, categories, impact_score)
+  - Validate and normalise field values
+  - Prevent duplicate URLs
+  - Construct SQLAlchemy Headline ORM objects
+  - Persist to MySQL with proper session management
+  - Return structured, typed results to callers (API routes / schedulers)
+
+This module intentionally does NOT contain:
+  - FastAPI routes
+  - HTTP fetch logic
+  - Raw SQL
+  - Sentiment analysis or NLP
+  - Analytics / statistical logic
 """
 
 import importlib
@@ -22,12 +33,12 @@ from zoneinfo import ZoneInfo
 
 try:
     from sqlalchemy.exc import SQLAlchemyError
-except ModuleNotFoundError:  # pragma: no cover - depends on project deps
+except ModuleNotFoundError:  # pragma: no cover
     class SQLAlchemyError(Exception):  # type: ignore[no-redef]
-        """Fallback used only when SQLAlchemy is not installed locally."""
+        """Fallback when SQLAlchemy is not installed locally."""
 
 from scrapers.news_fetcher import NewsFetcher
-
+from intelligence.keywords_engine import KeywordEngine
 
 
 logger = logging.getLogger(__name__)
@@ -48,7 +59,6 @@ HEADLINE_MODEL_MODULE_CANDIDATES = (
     "models.headline_data",
     "models.news",
     "db.models",
-    "models",
 )
 
 
@@ -58,24 +68,62 @@ class NewsServiceConfigurationError(RuntimeError):
 
 class NewsService:
     """
-    Business-layer service for fetching, validating, and storing news headlines.
+    Business-layer service for fetching, enriching, and storing news headlines.
+
+    The enrichment pipeline runs KeywordEngine on every article before
+    persistence, so every stored Headline row carries:
+
+        keywords_detected       — comma-joined string of matched keywords
+        categories              — comma-joined string of matched categories
+        matched_keywords_count  — integer count
+        impact_score            — weighted integer score
 
     Public methods are designed to be called by FastAPI routes, cron jobs,
     APScheduler/Celery workers, or data pipelines.
+
+    Example usage::
+
+        service = NewsService()
+        result = service.fetch_and_store_everything(
+            query="Kenya Power KPLC",
+            language="en",
+            db_session=db,
+        )
+        print(result["saved"], "headlines stored")
     """
 
     def __init__(
         self,
         *,
         fetcher: Optional[NewsFetcher] = None,
+        keyword_engine: Optional[KeywordEngine] = None,
         session_factory: Optional[Callable[[], Any]] = None,
         headline_model: Optional[Any] = None,
         persist_fallback_articles: bool = False,
     ) -> None:
+        """
+        Args:
+            fetcher:                   NewsFetcher instance (or default).
+            keyword_engine:            KeywordEngine instance (or default).
+                                       Inject a custom subclass to override
+                                       keywords/weights without touching this file.
+            session_factory:           Callable returning a SQLAlchemy session.
+                                       Resolved lazily from database.session if omitted.
+            headline_model:            SQLAlchemy Headline ORM class.
+                                       Resolved lazily from models.headline_data if omitted.
+            persist_fallback_articles: If True, fallback (mock) articles are
+                                       persisted.  Defaults to False so development
+                                       runs don't pollute production tables.
+        """
         self.fetcher = fetcher or NewsFetcher()
+        self.keyword_engine = keyword_engine or KeywordEngine()
         self._session_factory = session_factory
         self._headline_model = headline_model
         self.persist_fallback_articles = persist_fallback_articles
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     def fetch_and_store_top_headlines(
         self,
@@ -92,7 +140,20 @@ class NewsService:
         **extra_params: Any,
     ) -> Dict[str, Any]:
         """
-        Fetch top headlines from NewsAPI and persist valid, non-duplicate rows.
+        Fetch top headlines from NewsAPI, enrich them, and persist valid rows.
+
+        Args:
+            db_session: Optional external SQLAlchemy session (caller owns lifecycle).
+            country:    2-letter ISO country code, e.g. "ke".
+            category:   NewsAPI category, e.g. "business".
+            sources:    Comma-separated NewsAPI source IDs.
+            query/q:    Keyword query string.
+            page_size:  Results per page (max 100).
+            limit:      Override page_size.
+            page:       Pagination page.
+
+        Returns:
+            Service result dict — see :meth:`_result`.
         """
         fetch_response = self.fetcher.fetch_top_headlines(
             country=country,
@@ -131,7 +192,25 @@ class NewsService:
         **extra_params: Any,
     ) -> Dict[str, Any]:
         """
-        Search NewsAPI everything endpoint and persist valid, non-duplicate rows.
+        Search NewsAPI everything endpoint, enrich results, and persist valid rows.
+
+        Args:
+            db_session:      Optional external SQLAlchemy session.
+            query/q:         Keywords, e.g. "Kenya Power KPLC electricity".
+            search_in:       Restrict field search: "title", "description", "content".
+            sources:         Comma-separated source IDs.
+            domains:         Restrict to domains, e.g. "businessdailyafrica.com".
+            exclude_domains: Exclude domains.
+            from_date:       Oldest article date, e.g. "2026-05-01".
+            to_date:         Newest article date.
+            language:        ISO language code, e.g. "en".
+            sort_by:         "relevancy" | "popularity" | "publishedAt".
+            page_size:       Results per page (max 100).
+            limit:           Override page_size.
+            page:            Pagination page.
+
+        Returns:
+            Service result dict — see :meth:`_result`.
         """
         fetch_response = self.fetcher.search_everything(
             query=query,
@@ -155,6 +234,10 @@ class NewsService:
             db_session=db_session,
         )
 
+    # ------------------------------------------------------------------
+    # Core pipeline
+    # ------------------------------------------------------------------
+
     def _store_fetch_response(
         self,
         *,
@@ -162,39 +245,59 @@ class NewsService:
         endpoint: str,
         db_session: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Persist articles from a NewsFetcher response."""
-        articles = self._extract_articles(fetch_response)
-        fetched_count = fetch_response.get("total_results")
+        """
+        Full pipeline: raw fetch response → enrich → validate → normalise → save.
+
+        Steps:
+          1. Extract raw article list from the fetcher envelope.
+          2. Guard against fallback-only runs (configurable).
+          3. Run KeywordEngine.enrich_articles() on the full batch.
+          4. Validate each enriched article.
+          5. Normalise fields into Headline-ready dicts.
+          6. Deduplicate within the batch and against the DB.
+          7. Build ORM objects and persist in one transaction.
+
+        Args:
+            fetch_response: Raw dict returned by NewsFetcher.
+            endpoint:       Human-readable endpoint name for logging/results.
+            db_session:     Optional caller-owned SQLAlchemy session.
+
+        Returns:
+            Service result dict.
+        """
+        raw_articles = self._extract_articles(fetch_response)
+        fetched_count = fetch_response.get("total_results", 0)
         fetch_success = bool(fetch_response.get("success"))
         fallback_used = bool(fetch_response.get("fallback_used"))
 
         logger.info(
             "News fetch completed: endpoint=%s success=%s fetched=%s fallback=%s",
-            endpoint,
-            fetch_success,
-            fetched_count,
-            fallback_used,
+            endpoint, fetch_success, fetched_count, fallback_used,
         )
 
+        # Skip persisting fallback articles unless explicitly enabled.
         if not fetch_success and fallback_used and not self.persist_fallback_articles:
             error = str(fetch_response.get("error") or "News fetch failed")
             logger.warning(
-                "Skipping fallback articles for persistence: endpoint=%s fetched=%s error=%s",
-                endpoint,
-                fetched_count,
-                error,
+                "Skipping fallback articles: endpoint=%s fetched=%s error=%s",
+                endpoint, fetched_count, error,
             )
             return self._result(
-                success=False,
-                endpoint=endpoint,
-                fetched=fetched_count,
-                saved=0,
-                duplicates=0,
-                invalid=0,
-                errors=[error],
-                error=error,
-                fallback_used=fallback_used,
+                success=False, endpoint=endpoint, fetched=fetched_count,
+                saved=0, duplicates=0, invalid=0, errors=[error],
+                error=error, fallback_used=fallback_used,
             )
+
+        # ----------------------------------------------------------
+        # Step 1 — Keyword enrichment (runs on the whole batch at once
+        # for efficiency; KeywordEngine.enrich_articles is O(n)).
+        # ----------------------------------------------------------
+        enriched_articles = self.keyword_engine.enrich_articles(raw_articles)
+
+        logger.info(
+            "Keyword enrichment complete: endpoint=%s articles=%d",
+            endpoint, len(enriched_articles),
+        )
 
         session, should_close = self._get_session(db_session)
         invalid_count = 0
@@ -203,10 +306,13 @@ class NewsService:
         errors: List[str] = []
 
         try:
-            normalized_articles: List[Dict[str, Any]] = []
+            # ----------------------------------------------------------
+            # Step 2 — Validate → normalise → deduplicate within batch
+            # ----------------------------------------------------------
+            normalised_articles: List[Dict[str, Any]] = []
             seen_urls: Set[str] = set()
 
-            for article in articles:
+            for article in enriched_articles:
                 is_valid, validation_error = self._validate_article(article)
                 if not is_valid:
                     invalid_count += 1
@@ -214,84 +320,92 @@ class NewsService:
                     logger.debug("Skipping invalid article: %s", validation_error)
                     continue
 
-                normalized = self._normalize_article(article)
-                url = normalized["url"]
+                normalised = self._normalize_article(article)
+                url = normalised["url"]
+
                 if url in seen_urls:
                     duplicate_count += 1
                     continue
 
                 seen_urls.add(url)
-                normalized_articles.append(normalized)
+                normalised_articles.append(normalised)
 
+            # ----------------------------------------------------------
+            # Step 3 — Deduplicate against existing DB rows
+            # ----------------------------------------------------------
             existing_urls = self._existing_urls(
                 session=session,
-                urls=[article["url"] for article in normalized_articles],
+                urls=[a["url"] for a in normalised_articles],
             )
 
             headline_objects = []
-            for normalized in normalized_articles:
-                if normalized["url"] in existing_urls:
+            for normalised in normalised_articles:
+                if normalised["url"] in existing_urls:
                     duplicate_count += 1
                     continue
-                headline_objects.append(self._create_headline_object(normalized))
+                headline_objects.append(self._create_headline_object(normalised))
 
+            # ----------------------------------------------------------
+            # Step 4 — Persist
+            # ----------------------------------------------------------
             saved_count = self._save_articles(session, headline_objects)
 
             if invalid_count:
-                logger.warning("Skipped invalid articles: count=%s", invalid_count)
+                logger.warning("Skipped invalid articles: count=%d", invalid_count)
+
             logger.info(
-                "News persistence completed: endpoint=%s fetched=%s saved=%s duplicates=%s invalid=%s",
-                endpoint,
-                fetched_count,
-                saved_count,
-                duplicate_count,
-                invalid_count,
+                "News persistence complete: endpoint=%s fetched=%s "
+                "saved=%d duplicates=%d invalid=%d",
+                endpoint, fetched_count, saved_count, duplicate_count, invalid_count,
             )
 
             return self._result(
-                success=True,
-                endpoint=endpoint,
-                fetched=fetched_count,
-                saved=saved_count,
-                duplicates=duplicate_count,
-                invalid=invalid_count,
-                errors=errors,
-                fallback_used=fallback_used,
+                success=True, endpoint=endpoint, fetched=fetched_count,
+                saved=saved_count, duplicates=duplicate_count, invalid=invalid_count,
+                errors=errors, fallback_used=fallback_used,
             )
+
         except SQLAlchemyError as exc:
             self._rollback_safely(session)
             logger.exception("Database failure while saving news articles")
             return self._result(
-                success=False,
-                endpoint=endpoint,
-                fetched=fetched_count,
-                saved=saved_count,
-                duplicates=duplicate_count,
-                invalid=invalid_count,
-                errors=errors + [str(exc)],
-                error="Database commit failed",
+                success=False, endpoint=endpoint, fetched=fetched_count,
+                saved=saved_count, duplicates=duplicate_count, invalid=invalid_count,
+                errors=errors + [str(exc)], error="Database commit failed",
                 fallback_used=fallback_used,
             )
-        except Exception as exc:
+
+        except Exception as exc:  # noqa: BLE001
             self._rollback_safely(session)
             logger.exception("Unexpected failure while saving news articles")
             return self._result(
-                success=False,
-                endpoint=endpoint,
-                fetched=fetched_count,
-                saved=saved_count,
-                duplicates=duplicate_count,
-                invalid=invalid_count,
-                errors=errors + [str(exc)],
-                error=str(exc),
+                success=False, endpoint=endpoint, fetched=fetched_count,
+                saved=saved_count, duplicates=duplicate_count, invalid=invalid_count,
+                errors=errors + [str(exc)], error=str(exc),
                 fallback_used=fallback_used,
             )
+
         finally:
             if should_close:
                 session.close()
 
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
     def _validate_article(self, article: Any) -> Tuple[bool, str]:
-        """Validate the minimum raw NewsAPI article shape required for storage."""
+        """
+        Validate the minimum NewsAPI article shape required for storage.
+
+        Checks for title, url, and source — the three fields the Headline
+        model marks as NOT NULL.
+
+        Args:
+            article: Enriched article dict from KeywordEngine.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
         if not isinstance(article, Mapping):
             return False, "Invalid article shape"
 
@@ -306,17 +420,49 @@ class NewsService:
         if not source:
             return False, "Missing article source"
 
-        published_at = article.get("publishedAt")
-        if published_at:
-            self._parse_datetime(published_at)
-
         return True, ""
+
+    # ------------------------------------------------------------------
+    # Normalisation
+    # ------------------------------------------------------------------
 
     def _normalize_article(self, article: Mapping[str, Any]) -> Dict[str, Any]:
         """
-        Convert raw NewsAPI article fields into Headline-ready field values.
+        Convert an enriched article dict into Headline ORM-ready field values.
+
+        Intelligence fields produced by KeywordEngine are serialised here:
+          - ``keywords``   list[str]  →  ``keywords_detected``  comma-joined str
+          - ``categories`` list[str]  →  ``categories``         comma-joined str
+          - ``matched_keywords_count`` and ``impact_score`` pass through as-is.
+
+        This conversion matches the Headline model column definitions:
+            keywords_detected  = Column(Text)
+            categories         = Column(Text)
+            matched_keywords_count = Column(Integer)
+            impact_score       = Column(Integer)
+
+        Args:
+            article: Enriched article dict (original fields + intelligence fields).
+
+        Returns:
+            Dict ready to be passed to :meth:`_create_headline_object`.
         """
+        # -- Intelligence fields from KeywordEngine ---------------------
+        raw_keywords: List[str] = article.get("keywords_detected") or []
+        raw_categories: List[str] = article.get("categories") or []
+        matched_keywords_count: int = article.get("matched_keywords_count") or 0
+        impact_score: int = article.get("impact_score") or 0
+
+        # Serialise lists to comma-joined strings for Text columns.
+        keywords_detected: Optional[str] = (
+            ", ".join(raw_keywords) if raw_keywords else None
+        )
+        categories_str: Optional[str] = (
+            ", ".join(raw_categories) if raw_categories else None
+        )
+
         return {
+            # -- Core NewsAPI fields ------------------------------------
             "source": self._truncate(
                 self._extract_source_name(article.get("source")) or "Unknown",
                 MAX_SOURCE_LENGTH,
@@ -325,49 +471,96 @@ class NewsService:
                 self._clean_string(article.get("title"), default="Untitled"),
                 MAX_HEADLINE_LENGTH,
             ),
-            "description": self._clean_string(article.get("description"), none_if_empty=True),
-            "content": self._clean_string(article.get("content"), none_if_empty=True),
+            "description": self._clean_string(
+                article.get("description"), none_if_empty=True
+            ),
+            "content": self._clean_string(
+                article.get("content"), none_if_empty=True
+            ),
             "url": self._truncate(
                 self._clean_string(article.get("url"), default=""),
                 MAX_URL_LENGTH,
             ),
             "published_at": self._parse_datetime(article.get("publishedAt")),
             "timestamp": self._now_nairobi(),
+
+            # -- Intelligence fields ------------------------------------
+            "keywords_detected": keywords_detected,
+            "categories": categories_str,
+            "matched_keywords_count": matched_keywords_count,
+            "impact_score": impact_score,
+
+            # -- Downstream enrichment slots (sentiment engine, Phase 2)
             "sentiment_score": None,
-            "keyword_detected": None,
         }
 
-    def _create_headline_object(self, normalized: Mapping[str, Any]) -> Any:
-        """Create a SQLAlchemy Headline ORM instance from normalized data."""
+    # ------------------------------------------------------------------
+    # ORM construction
+    # ------------------------------------------------------------------
+
+    def _create_headline_object(self, normalised: Mapping[str, Any]) -> Any:
+        """
+        Build a SQLAlchemy Headline ORM instance from normalised field values.
+
+        Maps directly to the Headline model columns defined in
+        models/headline_data.py:
+
+            source, headline, description, content, sentiment_score,
+            published_at, keywords_detected, categories,
+            matched_keywords_count, impact_score, url, timestamp
+
+        Args:
+            normalised: Dict produced by :meth:`_normalize_article`.
+
+        Returns:
+            Unpersisted Headline ORM object.
+        """
         headline_model = self._get_headline_model()
         return headline_model(
-            source=normalized["source"],
-            headline=normalized["headline"],
-            description=normalized["description"],
-            content=normalized["content"],
-            sentiment_score=normalized["sentiment_score"],
-            published_at=normalized["published_at"],
-            keyword_detected=normalized["keyword_detected"],
-            url=normalized["url"],
-            timestamp=normalized["timestamp"],
+            source=normalised["source"],
+            headline=normalised["headline"],
+            description=normalised["description"],
+            content=normalised["content"],
+            sentiment_score=normalised["sentiment_score"],
+            published_at=normalised["published_at"],
+            keywords_detected=normalised["keywords_detected"],
+            categories=normalised["categories"],
+            matched_keywords_count=normalised["matched_keywords_count"],
+            impact_score=normalised["impact_score"],
+            url=normalised["url"],
+            timestamp=normalised["timestamp"],
         )
 
+    # ------------------------------------------------------------------
+    # Database helpers
+    # ------------------------------------------------------------------
+
     def _save_articles(self, session: Any, articles: Sequence[Any]) -> int:
-        """Persist ORM objects in one transaction."""
+        """Persist ORM objects in a single transaction."""
         if not articles:
             return 0
-
         session.add_all(list(articles))
         session.commit()
         return len(articles)
 
     def _existing_urls(self, session: Any, urls: Sequence[str]) -> Set[str]:
-        """Return URLs already stored in the headlines table."""
+        """
+        Return the subset of *urls* already present in the headlines table.
+
+        Runs a single IN query — O(1) round-trips regardless of batch size.
+
+        Args:
+            session: Active SQLAlchemy session.
+            urls:    List of URL strings to check.
+
+        Returns:
+            Set of URLs already stored.
+        """
         if not urls:
             return set()
 
         headline_model = self._get_headline_model()
-        unique_urls = list(dict.fromkeys(urls))
+        unique_urls = list(dict.fromkeys(urls))  # preserve order, remove dups
 
         rows = (
             session.query(headline_model.url)
@@ -375,35 +568,27 @@ class NewsService:
             .all()
         )
 
-        existing = set()
+        existing: Set[str] = set()
         for row in rows:
-            if isinstance(row, tuple):
-                existing.add(row[0])
-            else:
-                existing.add(getattr(row, "url", row))
+            existing.add(row[0] if isinstance(row, tuple) else getattr(row, "url", row))
         return existing
 
-    def _article_exists(self, session: Any, url: str) -> bool:
-        """Check whether an article URL is already present."""
-        headline_model = self._get_headline_model()
-        return (
-            session.query(headline_model)
-            .filter(headline_model.url == url)
-            .first()
-            is not None
-        )
+    # ------------------------------------------------------------------
+    # Extraction helpers
+    # ------------------------------------------------------------------
 
-    def _extract_articles(self, fetch_response: Mapping[str, Any]) -> List[Mapping[str, Any]]:
-        """Safely extract article dictionaries from a fetcher response."""
+    def _extract_articles(
+        self, fetch_response: Mapping[str, Any]
+    ) -> List[Mapping[str, Any]]:
+        """Safely extract article dicts from a NewsFetcher response envelope."""
         articles = fetch_response.get("articles") or []
         if not isinstance(articles, list):
             logger.warning("Fetcher returned non-list articles payload")
             return []
-
-        return [article for article in articles if isinstance(article, Mapping)]
+        return [a for a in articles if isinstance(a, Mapping)]
 
     def _extract_source_name(self, source: Any) -> Optional[str]:
-        """Extract source.name from a NewsAPI source object."""
+        """Extract source.name (or source.id) from a NewsAPI source object."""
         if isinstance(source, Mapping):
             return self._clean_string(
                 source.get("name") or source.get("id"),
@@ -411,19 +596,28 @@ class NewsService:
             )
         return self._clean_string(source, none_if_empty=True)
 
+    # ------------------------------------------------------------------
+    # String / datetime utilities
+    # ------------------------------------------------------------------
+
     def _parse_datetime(self, value: Any) -> datetime:
         """
-        Parse NewsAPI timestamps safely.
+        Parse a NewsAPI ISO-8601 timestamp string into a Nairobi-aware datetime.
 
-        Invalid or missing timestamps fall back to the current Africa/Nairobi
-        time, as required by the ingestion rules.
+        Falls back to the current Nairobi time on any parse failure so the
+        Headline row is always stored with a valid timestamp.
+
+        Args:
+            value: Raw publishedAt string, e.g. "2026-05-18T09:00:00Z".
+
+        Returns:
+            Timezone-aware datetime in Africa/Nairobi.
         """
         if isinstance(value, datetime):
             parsed = value
         elif isinstance(value, str) and value.strip():
-            cleaned = value.strip().replace("Z", "+00:00")
             try:
-                parsed = datetime.fromisoformat(cleaned)
+                parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
             except ValueError:
                 logger.debug("Invalid publishedAt timestamp; using fallback: %r", value)
                 return self._now_nairobi()
@@ -442,13 +636,13 @@ class NewsService:
         default: Optional[str] = None,
         none_if_empty: bool = False,
     ) -> Optional[str]:
-        """Trim and normalize whitespace without changing article meaning."""
+        """Normalise whitespace and unicode noise without altering meaning."""
         if value is None:
             return None if none_if_empty else default
 
-        cleaned = str(value)
         cleaned = (
-            cleaned.replace("\xa0", " ")
+            str(value)
+            .replace("\xa0", " ")
             .replace("\u200b", "")
             .replace("\ufeff", "")
             .strip()
@@ -460,31 +654,36 @@ class NewsService:
         return cleaned
 
     def _truncate(self, value: Optional[str], max_length: int) -> Optional[str]:
-        """Safely truncate values to fit ORM column sizes."""
+        """Truncate to fit ORM column size limits."""
         if value is None:
             return None
-        if len(value) <= max_length:
-            return value
-        return value[:max_length].rstrip()
+        return value[:max_length].rstrip() if len(value) > max_length else value
 
     def _now_nairobi(self) -> datetime:
-        """Return the current timezone-aware Nairobi timestamp."""
+        """Current timezone-aware Nairobi timestamp."""
         return datetime.now(NAIROBI_TZ)
 
+    # ------------------------------------------------------------------
+    # Session / model resolution
+    # ------------------------------------------------------------------
+
     def _get_session(self, db_session: Optional[Any]) -> Tuple[Any, bool]:
-        """Return a database session and whether this service should close it."""
+        """
+        Return a (session, should_close) pair.
+
+        If a session is passed in by the caller (e.g. FastAPI Depends), we
+        use it and return should_close=False so the caller keeps ownership.
+        Otherwise we open one from the factory and return should_close=True.
+        """
         if db_session is not None:
             return db_session, False
-
-        session_factory = self._get_session_factory()
-        return session_factory(), True
+        return self._get_session_factory()(), True
 
     def _get_session_factory(self) -> Callable[[], Any]:
-        """Resolve SessionLocal lazily so the module remains importable."""
+        """Resolve SessionLocal lazily."""
         if self._session_factory is None:
             self._session_factory = self._resolve_import(
-                SESSIONLOCAL_MODULE_CANDIDATES,
-                "SessionLocal",
+                SESSIONLOCAL_MODULE_CANDIDATES, "SessionLocal"
             )
         return self._session_factory
 
@@ -492,13 +691,23 @@ class NewsService:
         """Resolve the Headline ORM model lazily."""
         if self._headline_model is None:
             self._headline_model = self._resolve_import(
-                HEADLINE_MODEL_MODULE_CANDIDATES,
-                "Headline",
+                HEADLINE_MODEL_MODULE_CANDIDATES, "Headline"
             )
         return self._headline_model
 
-    def _resolve_import(self, module_candidates: Sequence[str], attr_name: str) -> Any:
-        """Resolve a project attribute from common module locations."""
+    def _resolve_import(
+        self, module_candidates: Sequence[str], attr_name: str
+    ) -> Any:
+        """
+        Try each module path in order and return the first match for attr_name.
+
+        Args:
+            module_candidates: Ordered list of module paths to try.
+            attr_name:         Attribute to look for in each module.
+
+        Raises:
+            NewsServiceConfigurationError if nothing resolves.
+        """
         attempted = []
         for module_path in module_candidates:
             attempted.append(f"{module_path}.{attr_name}")
@@ -513,9 +722,8 @@ class NewsService:
             if hasattr(module, attr_name):
                 return getattr(module, attr_name)
 
-        attempted_text = ", ".join(attempted)
         raise NewsServiceConfigurationError(
-            f"Could not resolve {attr_name}. Tried: {attempted_text}. "
+            f"Could not resolve {attr_name}. Tried: {', '.join(attempted)}. "
             "Pass it explicitly to NewsService(...) if your project uses a "
             "different module path."
         )
@@ -524,8 +732,12 @@ class NewsService:
         """Rollback without masking the original exception."""
         try:
             session.rollback()
-        except Exception as exc:  # pragma: no cover - defensive cleanup
+        except Exception as exc:  # noqa: BLE001
             logger.error("Database rollback failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Result builder
+    # ------------------------------------------------------------------
 
     def _result(
         self,
@@ -540,7 +752,7 @@ class NewsService:
         fallback_used: bool,
         error: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Build a stable service-layer result payload."""
+        """Build a stable, typed service-layer result payload."""
         result: Dict[str, Any] = {
             "success": success,
             "endpoint": endpoint,
@@ -557,8 +769,11 @@ class NewsService:
         return result
 
 
+# ---------------------------------------------------------------------------
+# CLI smoke-test — python services/news_service.py
+# ---------------------------------------------------------------------------
+
 def main() -> int:
-    """Small CLI example for manual ingestion checks."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -577,8 +792,8 @@ def main() -> int:
             "success": False,
             "error": str(exc),
             "hint": (
-                "Ensure SessionLocal and the Headline ORM model are configured, "
-                "or pass them explicitly to NewsService."
+                "Ensure SessionLocal and the Headline ORM model are reachable, "
+                "or pass them explicitly to NewsService(...)."
             ),
         }
 

@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 NEWS_API_KEY_ENV = "NEWS_API_KEY"
 NEWS_API_BASE_URL = "https://newsapi.org"
 DEFAULT_TIMEOUT_SECONDS = 15
-DEFAULT_PAGE_SIZE = 20
+DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
 
 

@@ -54,7 +54,7 @@ class Headline(Base):
         nullable=False
     )
 
-    url = Column(String(1000), nullable=False)
+    url = Column(String(1000), nullable=False, index=True)
 
     timestamp = Column(
         DateTime(timezone=True),

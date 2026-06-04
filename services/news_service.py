@@ -134,7 +134,7 @@ class NewsService:
         sources: Optional[str] = None,
         query: Optional[str] = None,
         q: Optional[str] = None,
-        page_size: int = 20,
+        page_size: int = 50,
         limit: Optional[int] = None,
         page: int = 1,
         **extra_params: Any,
@@ -186,7 +186,7 @@ class NewsService:
         to_date: Optional[str] = None,
         language: Optional[str] = None,
         sort_by: Optional[str] = None,
-        page_size: int = 20,
+        page_size: int = 50,
         limit: Optional[int] = None,
         page: int = 1,
         **extra_params: Any,
@@ -338,31 +338,38 @@ class NewsService:
                 urls=[a["url"] for a in normalised_articles],
             )
 
+            impact_score_threshold = 2
             headline_objects = []
             for normalised in normalised_articles:
                 if normalised["url"] in existing_urls:
                     duplicate_count += 1
+                    continue
+                if normalised["impact_score"] < impact_score_threshold:
+                    logger.debug(
+                        "Skipping low-impact article: headline=%s impact_score=%d",
+                        normalised["headline"], normalised["impact_score"],
+                    )
                     continue
                 headline_objects.append(self._create_headline_object(normalised))
 
             # ----------------------------------------------------------
             # Step 4 — Persist
             # ----------------------------------------------------------
-            saved_count = self._save_articles(session, headline_objects)
+            saved_count, stored_ids = self._save_articles(session, headline_objects)
 
             if invalid_count:
                 logger.warning("Skipped invalid articles: count=%d", invalid_count)
 
             logger.info(
                 "News persistence complete: endpoint=%s fetched=%s "
-                "saved=%d duplicates=%d invalid=%d",
-                endpoint, fetched_count, saved_count, duplicate_count, invalid_count,
+                "saved=%d duplicates=%d invalid=%d stored_ids=%s",
+                endpoint, fetched_count, saved_count, duplicate_count, invalid_count, stored_ids
             )
 
             return self._result(
                 success=True, endpoint=endpoint, fetched=fetched_count,
-                saved=saved_count, duplicates=duplicate_count, invalid=invalid_count,
-                errors=errors, fallback_used=fallback_used,
+                saved=saved_count, duplicates=duplicate_count, invalid=invalid_count, 
+                stored_ids=stored_ids,errors=errors, fallback_used=fallback_used,
             )
 
         except SQLAlchemyError as exc:
@@ -535,13 +542,24 @@ class NewsService:
     # Database helpers
     # ------------------------------------------------------------------
 
-    def _save_articles(self, session: Any, articles: Sequence[Any]) -> int:
+    def _save_articles(self, session: Any, articles: Sequence[Any]) -> tuple[int, List[int]]:
         """Persist ORM objects in a single transaction."""
         if not articles:
-            return 0
+            return 0, []
         session.add_all(list(articles))
+        session.flush()  # flush to assign IDs for result reporting
+        stored_ids = self._get_stored_ids(articles)
         session.commit()
-        return len(articles)
+        return len(articles), stored_ids
+    
+    
+    def _get_stored_ids(self, articles: Sequence[Any]) -> list[int]:
+        """Extract database IDs from persisted ORM objects."""
+        return [
+            article.id
+            for article in articles
+            if getattr(article, "id", None) is not None
+        ]
 
     def _existing_urls(self, session: Any, urls: Sequence[str]) -> Set[str]:
         """
@@ -748,6 +766,7 @@ class NewsService:
         saved: int,
         duplicates: int,
         invalid: int,
+        stored_ids: Optional[List[int]] = None,
         errors: Sequence[str],
         fallback_used: bool,
         error: Optional[str] = None,
@@ -766,6 +785,8 @@ class NewsService:
         }
         if error:
             result["error"] = error
+        if stored_ids is not None:
+            result["stored_ids"] = stored_ids
         return result
 
 
@@ -784,7 +805,7 @@ def main() -> int:
         result = service.fetch_and_store_top_headlines(
             country="us",
             category="business",
-            limit=20,
+            limit=50,
         )
     except Exception as exc:
         logger.exception("News service example failed")

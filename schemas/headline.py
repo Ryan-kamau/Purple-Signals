@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field, Field
 
 
 class HeadlineResponse(BaseModel):
@@ -47,3 +47,30 @@ class HeadlineResponse(BaseModel):
             for category in self.categories.split(",")
             if category.strip()
         ]
+
+class IngestionResponse(BaseModel):
+    """
+    Response returned by NewsService ingestion operations.
+    """
+
+    success: bool
+
+    endpoint: str
+
+    fetched: int
+
+    saved: int
+
+    duplicates: int
+
+    invalid: int
+
+    errors: list[str]
+
+    fallback_used: bool
+
+    processed_at: datetime
+
+    stored_ids: list[int] = Field(default_factory=list)
+
+    error: str | None = None

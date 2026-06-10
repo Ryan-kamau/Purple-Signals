@@ -102,7 +102,7 @@ def get_news(
     ),
     page: int = Query(default=1, ge=1, description="Page number (1-indexed)."),
     page_size: int = Query(
-        default=20, ge=1, le=100, description="Records per page (1–100)."
+        default=50, ge=1, le=100, description="Records per page (1–100)."
     ),
     db: Session = Depends(get_db),
 ) -> list[HeadlineResponse]:
@@ -142,7 +142,7 @@ def get_news(
 )
 def get_latest_news(
     limit: int = Query(
-        default=10,
+        default=50,
         ge=1,
         le=100,
         description="Maximum number of headlines to return (1–100).",
@@ -176,7 +176,7 @@ def get_latest_news(
 )
 def get_high_impact_news(
     limit: int = Query(
-        default=20,
+        default=50,
         ge=1,
         le=100,
         description="Maximum number of headlines to return (1–100).",
@@ -211,7 +211,7 @@ def get_high_impact_news(
 def get_nse_relevant_news(
     page: int = Query(default=1, ge=1, description="Page number (1-indexed)."),
     page_size: int = Query(
-        default=20, ge=1, le=100, description="Records per page (1–100)."
+        default=50, ge=1, le=100, description="Records per page (1–100)."
     ),
     db: Session = Depends(get_db),
 ) -> list[HeadlineResponse]:
@@ -242,7 +242,7 @@ def get_nse_relevant_news(
 def get_news_by_keyword(
     keyword: str,
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=50, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[HeadlineResponse]:
     """
@@ -271,7 +271,7 @@ def get_news_by_keyword(
 def get_news_by_category(
     category: str,
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=50, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[HeadlineResponse]:
     """
@@ -299,7 +299,7 @@ def get_news_by_category(
 def get_news_by_source(
     source: str,
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=50, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[HeadlineResponse]:
     """

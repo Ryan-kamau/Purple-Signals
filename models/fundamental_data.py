@@ -1,6 +1,6 @@
 # models/fundamentals.py
 
-from sqlalchemy import Column, Integer, Float, DateTime
+from sqlalchemy import Column, Integer, Float, DateTime, String
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -11,6 +11,10 @@ class Fundamentals(Base):
     __tablename__ = "fundamentals"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    ticker = Column(String(10), nullable=False, index=True)
+
+    company = Column(String(255), nullable=False, index=True)
 
     eps = Column(Float)
 

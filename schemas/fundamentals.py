@@ -5,6 +5,9 @@ from datetime import datetime
 
 
 class FundamentalsBase(BaseModel):
+    ticker: str
+    company: str
+    report_date: datetime
     eps: float
     pe_ratio: float
     dividend_yield: float

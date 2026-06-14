@@ -13,6 +13,7 @@ class HeadlineResponse(BaseModel):
     content: str | None = None
     published_at: datetime | None = None
     sentiment_score: float | None = None
+    senntiment_label: str | None = None
 
     # Raw DB fields
     keywords_detected: str | None = None

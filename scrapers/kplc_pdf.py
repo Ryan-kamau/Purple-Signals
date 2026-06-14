@@ -36,7 +36,6 @@ from __future__ import annotations
 import io
 import logging
 import re
-from tkinter import N
 from typing import Optional
 
 import pdfplumber
@@ -64,7 +63,7 @@ _METRIC_ROWS: dict[str, str] = {
     "Revenue from contracts with customers": "revenue",
     "Profit After Tax": "profit_after_tax",
     "Basic and diluted earnings per share": "eps",
-    "Shareholders": "shareholders_equity",
+    "Shareholders' equity": "shareholders_equity",
     "Non-current liabilities": "non_current_liabilities",
     "Current liabilities": "current_liabilities",
 }
@@ -73,8 +72,6 @@ _METRIC_ROWS: dict[str, str] = {
 _INTERIM_DIVIDEND_KW: str = "Interim dividend"
 _FINAL_DIVIDEND_KW: str = "Final dividend"
 
-# Regex: match the first decimal or integer number in a string.
-_FIRST_NUMBER_RE = re.compile(r"[\d,]+(?:\.\d+)?")
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +203,20 @@ class KPLCFundamentalExtractor:
             net_profit_margin=metrics["net_profit_margin"],
         )
 
+        existing = (
+                db.query(Fundamentals)
+                .filter(
+                    Fundamentals.ticker == metrics["ticker"],
+                    Fundamentals.report_date == metrics["report_date"],
+                )
+                .first()
+            )
+
+        if existing:
+            raise RuntimeError(
+                f"Fundamentals already exist for "
+                f"{metrics['ticker']} on {metrics['report_date']}"
+            )
         try:
             db.add(record)
             db.commit()
@@ -354,16 +365,18 @@ class KPLCFundamentalExtractor:
 
         for line in lines:
 
-            normalized = (
-                line.lower()
-                .replace("’", "'")
-                .replace("‘", "'")
-            )
+            normalized = self._normalize_text(line)
 
             # Financial statement rows
             for row_text, field in _METRIC_ROWS.items():
 
-                if row_text.lower() in normalized:
+                row_normalized = self._normalize_text(row_text)
+
+                if normalized.startswith(row_normalized):
+
+                    # Don't overwrite an already extracted value
+                    if raw[field] is not None:
+                        continue
 
                     value = self._extract_2025_value(line)
 
@@ -377,19 +390,23 @@ class KPLCFundamentalExtractor:
                         )
 
             # Interim dividend
-            if "interim dividend" in normalized:
-
+            if (
+                "interim dividend" in normalized
+                and interim_dividend == 0.0
+            ):
                 value = self._extract_2025_value(line)
 
-                if value:
+                if value is not None:
                     interim_dividend = value
 
             # Final dividend
-            if "final dividend" in normalized:
-
+            if (
+                "final dividend" in normalized
+                and final_dividend == 0.0
+            ):
                 value = self._extract_2025_value(line)
 
-                if value:
+                if value is not None:
                     final_dividend = value
 
         raw["dividend_per_share"] = interim_dividend + final_dividend
@@ -467,28 +484,7 @@ class KPLCFundamentalExtractor:
 
     # ------------------------------------------------------------------
     # Private: numeric helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _first_number(line: str) -> Optional[float]:
-        """
-        Extract and return the first numeric value from *line*.
-
-        Handles comma-formatted numbers (e.g. "219,285" → 219285.0).
-
-        Args:
-            line: A single text line from the PDF.
-
-        Returns:
-            Float value or None if no number is found.
-        """
-        match = _FIRST_NUMBER_RE.search(line)
-        if not match:
-            return None
-        try:
-            return float(match.group(0).replace(",", ""))
-        except ValueError:
-            return None
+    # ----------------------------------------------------------------
 
     @staticmethod
     def _safe_divide(

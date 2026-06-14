@@ -36,6 +36,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+from tkinter import N
 from typing import Optional
 
 import pdfplumber
@@ -45,6 +46,7 @@ from sqlalchemy.orm import Session
 from models.fundamental_data import Fundamentals
 from models.market_data import MarketData
 from database.session import  SessionLocal
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +60,11 @@ _REQUEST_TIMEOUT: int = 30  # seconds
 # Keyword → attribute name mapping for single-line numeric extractions.
 # The extractor searches for the FIRST line containing the keyword and pulls
 # the first numeric token from that line.
-_LINE_KEYWORDS: dict[str, str] = {
-    "Basic and diluted earnings per share": "eps",
+_METRIC_ROWS: dict[str, str] = {
     "Revenue from contracts with customers": "revenue",
     "Profit After Tax": "profit_after_tax",
-    "Shareholders' equity": "shareholders_equity",
+    "Basic and diluted earnings per share": "eps",
+    "Shareholders": "shareholders_equity",
     "Non-current liabilities": "non_current_liabilities",
     "Current liabilities": "current_liabilities",
 }
@@ -111,6 +113,9 @@ class KPLCFundamentalExtractor:
         pdf_bytes = self._download_pdf(pdf_url)
         lines = self._extract_lines(pdf_bytes)
         raw = self._parse_lines(lines)
+        raw["ticker"] = KPLC_TICKER
+        raw["company"] = "Kenya Power and Lighting Company Plc"
+        raw["report_date"] = self._extract_report_date("\n".join(lines))
         return raw
 
     def calculate_ratios(
@@ -169,6 +174,10 @@ class KPLCFundamentalExtractor:
             ratios["debt_ratio"],
             ratios["net_profit_margin"],
         )
+        ratios["ticker"] = KPLC_TICKER
+        ratios["company"] = "Kenya Power and Lighting Company Plc"
+        ratios["report_date"] = extracted_data["report_date"]
+
         return ratios
 
     def save_to_db(self, db: Session, metrics: dict) -> Fundamentals:
@@ -186,6 +195,9 @@ class KPLCFundamentalExtractor:
             RuntimeError: If the database write fails.
         """
         record = Fundamentals(
+            ticker=KPLC_TICKER,
+            company="Kenya Power and Lighting Company Plc",
+            report_date=metrics["report_date"],
             eps=metrics["eps"],
             pe_ratio=metrics["pe_ratio"],
             dividend_yield=metrics["dividend_yield"],
@@ -299,67 +311,115 @@ class KPLCFundamentalExtractor:
             .replace("”", '"')
         )
 
+    @staticmethod
+    def _extract_report_date(text: str):
+        matches = re.findall(
+            r"\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b",
+            text
+        )
+
+        if not matches:
+            return None
+
+        return datetime.strptime(
+            matches[-1],
+            "%d %B %Y"
+        ).date()
+
     # ------------------------------------------------------------------
     # Private: parsing
     # ------------------------------------------------------------------
 
     def _parse_lines(self, lines: list[str]) -> dict:
         """
-        Run keyword matching over the line list and extract all required
-        financial figures.
-
-        Args:
-            lines: Flat list of text lines from the PDF.
-
-        Returns:
-            Raw extracted dict with keys matching _LINE_KEYWORDS values plus
-            dividend_per_share.
-
-        Raises:
-            RuntimeError: If any required metric cannot be found.
+        Parse the audited financial statement rows and extract
+        the 2025 values.
         """
-        raw: dict[str, Optional[float]] = {attr: None for attr in _LINE_KEYWORDS.values()}
-        raw["dividend_per_share"] = None
+
+        raw = {
+            "ticker": KPLC_TICKER,
+            "company": "Kenya Power and Lighting Company Plc",
+            "report_date": self._extract_report_date("\n".join(lines)),
+            "revenue": None,
+            "profit_after_tax": None,
+            "eps": None,
+            "shareholders_equity": None,
+            "non_current_liabilities": None,
+            "current_liabilities": None,
+            "dividend_per_share": 0.0,
+        }
+
+        interim_dividend = 0.0
+        final_dividend = 0.0
 
         for line in lines:
-            # Single-value keyword matches
-            for keyword, attr in _LINE_KEYWORDS.items():
-                normalized_line = self._normalize_text(line)
 
-                if raw[attr] is None and self._normalize_text(keyword) in normalized_line:
-                    value = self._first_number(line)
+            normalized = (
+                line.lower()
+                .replace("’", "'")
+                .replace("‘", "'")
+            )
+
+            # Financial statement rows
+            for row_text, field in _METRIC_ROWS.items():
+
+                if row_text.lower() in normalized:
+
+                    value = self._extract_2025_value(line)
+
                     if value is not None:
-                        raw[attr] = value
+                        raw[field] = value
 
-            # Dividend: interim
-            if raw.get("_interim") is None and self._normalize_text(_INTERIM_DIVIDEND_KW) in normalized_line:
-                raw["_interim"] = self._first_number(line) or 0.0
+                        logger.info(
+                            "Extracted %-25s = %s",
+                            field,
+                            value,
+                        )
 
-            # Dividend: final
-            if raw.get("_final") is None and self._normalize_text(_FINAL_DIVIDEND_KW) in normalized_line:
-                raw["_final"] = self._first_number(line) or 0.0
+            # Interim dividend
+            if "interim dividend" in normalized:
 
-        # Compute dividend_per_share from interim + final
-        interim = raw.pop("_interim", None) or 0.0
-        final_ = raw.pop("_final", None) or 0.0
-        raw["dividend_per_share"] = round(interim + final_, 4)
+                value = self._extract_2025_value(line)
 
-        # Validate all required fields are present
-        missing = [k for k, v in raw.items() if v is None]
-        for attr in missing:
-            logger.warning("Expected metric not found: %s", attr)
+                if value:
+                    interim_dividend = value
 
-        required = list(_LINE_KEYWORDS.values()) + ["dividend_per_share"]
-        still_missing = [k for k in required if raw.get(k) is None]
-        if still_missing:
+            # Final dividend
+            if "final dividend" in normalized:
+
+                value = self._extract_2025_value(line)
+
+                if value:
+                    final_dividend = value
+
+        raw["dividend_per_share"] = interim_dividend + final_dividend
+
+        required = [
+            "report_date",
+            "revenue",
+            "profit_after_tax",
+            "eps",
+            "shareholders_equity",
+            "non_current_liabilities",
+            "current_liabilities",
+        ]
+
+        missing = [field for field in required if raw[field] is None]
+
+        if missing:
             raise RuntimeError(
-                f"Could not extract required metrics from PDF: {still_missing}"
+                f"Could not extract required metrics from PDF: {missing}"
             )
 
         logger.info(
-            "Metrics extracted | eps=%.2f revenue=%.0f profit_after_tax=%.0f "
-            "shareholders_equity=%.0f non_current_liabilities=%.0f "
-            "current_liabilities=%.0f dividend_per_share=%.2f",
+            "Metrics extracted | "
+            "ticker=%s company=%s report_date=%s "
+            "eps=%s revenue=%s PAT=%s equity=%s "
+            "non_current_liabilities=%s current_liabilities=%s "
+            "dividend=%s",
+            raw["ticker"],
+            raw["company"],
+            raw["report_date"],
             raw["eps"],
             raw["revenue"],
             raw["profit_after_tax"],
@@ -368,7 +428,8 @@ class KPLCFundamentalExtractor:
             raw["current_liabilities"],
             raw["dividend_per_share"],
         )
-        return raw  # type: ignore[return-value]
+
+        return raw
 
     # ------------------------------------------------------------------
     # Private: DB helpers
@@ -453,6 +514,28 @@ class KPLCFundamentalExtractor:
             )
             return 0.0
         return numerator / denominator
+    
+    @staticmethod
+    def _extract_2025_value(line: str) -> Optional[float]:
+        """
+        Extract first financial value from a statement row.
+
+        Example:
+            Revenue from contracts with customers 219,285 231,124
+            -> 219285
+
+            Shareholders’ equity 109,335 87,314
+            -> 109335
+        """
+        numbers = re.findall(r"-?[\d,]+(?:\.\d+)?", line)
+
+        if not numbers:
+            return None
+
+        try:
+            return float(numbers[0].replace(",", ""))
+        except ValueError:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +569,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     EXTRACTED: dict = {
+        "ticker": raw["ticker"],
+        "company": raw["company"],
+        "report_date": raw["report_date"],
         "eps": raw["eps"],
         "revenue": raw["revenue"],
         "profit_after_tax": raw["profit_after_tax"],
@@ -500,7 +586,7 @@ if __name__ == "__main__":
 
     print("\nInput price : KSh", Fundamental_PRICE)
     print("\nCalculated ratios:")
-    print(json.dumps(ratios, indent=4))
+    print(json.dumps(ratios, indent=4, default=str))
 
     print("\nExpected approximate values:")
     print(f"  P/E ratio        : {Fundamental_PRICE / EXTRACTED['eps']:.4f}")

@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 
 from models.fundamental_data import Fundamentals
 from models.market_data import MarketData
+from database.session import  SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,16 @@ class KPLCFundamentalExtractor:
 
         return lines
 
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return (
+            text.lower()
+            .replace("’", "'")
+            .replace("‘", "'")
+            .replace("“", '"')
+            .replace("”", '"')
+        )
+
     # ------------------------------------------------------------------
     # Private: parsing
     # ------------------------------------------------------------------
@@ -313,17 +324,19 @@ class KPLCFundamentalExtractor:
         for line in lines:
             # Single-value keyword matches
             for keyword, attr in _LINE_KEYWORDS.items():
-                if raw[attr] is None and keyword.lower() in line.lower():
+                normalized_line = self._normalize_text(line)
+
+                if raw[attr] is None and self._normalize_text(keyword) in normalized_line:
                     value = self._first_number(line)
                     if value is not None:
                         raw[attr] = value
 
             # Dividend: interim
-            if raw.get("_interim") is None and _INTERIM_DIVIDEND_KW.lower() in line.lower():
+            if raw.get("_interim") is None and self._normalize_text(_INTERIM_DIVIDEND_KW) in normalized_line:
                 raw["_interim"] = self._first_number(line) or 0.0
 
             # Dividend: final
-            if raw.get("_final") is None and _FINAL_DIVIDEND_KW.lower() in line.lower():
+            if raw.get("_final") is None and self._normalize_text(_FINAL_DIVIDEND_KW) in normalized_line:
                 raw["_final"] = self._first_number(line) or 0.0
 
         # Compute dividend_per_share from interim + final
@@ -457,35 +470,41 @@ if __name__ == "__main__":
 
     # ── Offline test using the PDF text pasted directly ─────────────────────
     # Replace with a real URL when running against a live PDF.
-    SAMPLE_PDF_URL = "https://example.com/kplc-results-2025.pdf"
+    SAMPLE_PDF_URL = "https://www.nse.co.ke/wp-content/uploads/The-Kenya-Power-Lighting-Company-Plc-Audited-Financial-Results-for-the-Year-Ended-30-Jun-2025.pdf"
 
     print("\n" + "=" * 70)
-    print("KPLCFundamentalExtractor — offline ratio demo")
+    print("KPLCFundamentalExtractor —  demo")
     print("=" * 70)
 
-    # Simulate the extracted values as they would come from a real PDF.
-    MOCK_EXTRACTED: dict = {
-        "eps": 12.54,
-        "revenue": 219285.0,
-        "profit_after_tax": 24467.0,
-        "shareholders_equity": 109335.0,
-        "non_current_liabilities": 162278.0,
-        "current_liabilities": 117426.0,
-        "dividend_per_share": 1.00,
+    # extract values frmpdf.
+    db = SessionLocal()
+    try:
+        extractor = KPLCFundamentalExtractor()
+        raw = extractor.extract(SAMPLE_PDF_URL)
+    except Exception as e:
+        logger.error("Error occurred while extracting PDF data: %s", e)
+        sys.exit(1)
+
+    EXTRACTED: dict = {
+        "eps": raw["eps"],
+        "revenue": raw["revenue"],
+        "profit_after_tax": raw["profit_after_tax"],
+        "shareholders_equity": raw["shareholders_equity"],
+        "non_current_liabilities": raw["non_current_liabilities"],
+        "current_liabilities": raw["current_liabilities"],
+        "dividend_per_share": raw.get("dividend_per_share"),
     }
 
-    MOCK_PRICE = 15.45
+    Fundamental_PRICE = extractor._fetch_latest_price(db)
+    ratios = extractor.calculate_ratios(EXTRACTED, stock_price=Fundamental_PRICE)
 
-    extractor = KPLCFundamentalExtractor()
-    ratios = extractor.calculate_ratios(MOCK_EXTRACTED, stock_price=MOCK_PRICE)
-
-    print("\nInput price : KSh", MOCK_PRICE)
+    print("\nInput price : KSh", Fundamental_PRICE)
     print("\nCalculated ratios:")
     print(json.dumps(ratios, indent=4))
 
     print("\nExpected approximate values:")
-    print(f"  P/E ratio        : {MOCK_PRICE / MOCK_EXTRACTED['eps']:.4f}")
-    print(f"  Dividend yield   : {MOCK_EXTRACTED['dividend_per_share'] / MOCK_PRICE:.6f}")
-    total_liab = MOCK_EXTRACTED["current_liabilities"] + MOCK_EXTRACTED["non_current_liabilities"]
-    print(f"  Debt ratio       : {total_liab / MOCK_EXTRACTED['shareholders_equity']:.4f}")
-    print(f"  Net profit margin: {MOCK_EXTRACTED['profit_after_tax'] / MOCK_EXTRACTED['revenue']:.6f}")
+    print(f"  P/E ratio        : {Fundamental_PRICE / EXTRACTED['eps']:.4f}")
+    print(f"  Dividend yield   : {EXTRACTED['dividend_per_share'] / Fundamental_PRICE:.6f}")
+    total_liab = EXTRACTED["current_liabilities"] + EXTRACTED["non_current_liabilities"]
+    print(f"  Debt ratio       : {total_liab / EXTRACTED['shareholders_equity']:.4f}")
+    print(f"  Net profit margin: {EXTRACTED['profit_after_tax'] / EXTRACTED['revenue']:.6f}")

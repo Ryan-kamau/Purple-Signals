@@ -16,6 +16,8 @@ class Fundamentals(Base):
 
     company = Column(String(255), nullable=False, index=True)
 
+    report_date = Column(DateTime(timezone=True), nullable=False, index=True)
+
     eps = Column(Float)
 
     pe_ratio = Column(Float)

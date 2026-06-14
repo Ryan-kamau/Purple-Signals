@@ -362,6 +362,12 @@ class KPLCFundamentalExtractor:
 
         interim_dividend = 0.0
         final_dividend = 0.0
+        for i, line in enumerate(lines):
+            if "interim dividend" in line.lower():
+                logger.info("LINE %s -> %s", i, line)
+
+                for j in range(i, min(i + 5, len(lines))):
+                    logger.info("NEXT %s -> %s", j, lines[j])
 
         for line in lines:
 
@@ -388,27 +394,50 @@ class KPLCFundamentalExtractor:
                             field,
                             value,
                         )
+            for i, line in enumerate(lines):
 
-            # Interim dividend
-            if (
-                "interim dividend" in normalized
-                and interim_dividend == 0.0
-            ):
-                value = self._extract_2025_value(line)
+                normalized = self._normalize_text(line)
 
-                if value is not None:
-                    interim_dividend = value
+                # ------------------------------
+                # Interim dividend
+                # ------------------------------
+                if (
+                    "interim dividend" in normalized
+                    and interim_dividend == 0.0
+                ):
 
-            # Final dividend
-            if (
-                "final dividend" in normalized
-                and final_dividend == 0.0
-            ):
-                value = self._extract_2025_value(line)
+                    value = self._extract_2025_value(line)
 
-                if value is not None:
-                    final_dividend = value
+                    # number may be on next line
+                    if value is None and i + 1 < len(lines):
+                        value = self._extract_2025_value(lines[i + 1])
 
+                    if value is not None:
+                        interim_dividend = value
+                        logger.info(
+                            "Extracted interim dividend = %s",
+                            interim_dividend,
+                        )
+
+                # ------------------------------
+                # Final dividend
+                # ------------------------------
+                if (
+                    "final dividend" in normalized
+                    and final_dividend == 0.0
+                ):
+
+                    value = self._extract_2025_value(line)
+
+                    if value is None and i + 1 < len(lines):
+                        value = self._extract_2025_value(lines[i + 1])
+
+                    if value is not None:
+                        final_dividend = value
+                        logger.info(
+                            "Extracted final dividend = %s",
+                            final_dividend,
+                        )
         raw["dividend_per_share"] = interim_dividend + final_dividend
 
         required = [

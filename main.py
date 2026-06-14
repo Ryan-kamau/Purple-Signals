@@ -16,7 +16,7 @@ import logging
 
 from fastapi import FastAPI
 
-from api import market, news, news_ingestion
+from api import market, news, news_ingestion, fundamentals
 from database.session import init_db
 
 # ---------------------------------------------------------------------------
@@ -60,6 +60,7 @@ def on_startup() -> None:
 app.include_router(market.router)
 app.include_router(news.router)
 app.include_router(news_ingestion.router)
+app.include_router(fundamentals.router)
 
 
 # ---------------------------------------------------------------------------

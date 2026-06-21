@@ -12,9 +12,16 @@ class MacroData(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
+    report_date = Column(DateTime(timezone=True), default=
+                         datetime.now(ZoneInfo("Africa/Nairobi")))
+
     inflation = Column(Float)
 
     fuel_price = Column(Float)
+
+    cbk_rate = Column(Float)
+
+    usd_kes_rate = Column(Float)
 
     policy_signal = Column(String(255))
 

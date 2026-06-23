@@ -445,15 +445,13 @@ class MacroPdfExtractor:
         Expected: ~4.39 (March 2026)
         """
         df = self._find_table_by_keywords(
-            ["inflation","kenya inflation"],
-            min_matches=2
-
+            ["inflation"]
         )
 
         if df is None:
             return None
 
-        row = self._extract_month_row(
+        row = self._find_row_by_month(
             df,
             self._report_date.strftime("%B")
         )
@@ -461,18 +459,18 @@ class MacroPdfExtractor:
         if row is None:
             return None
 
-        nums = self._extract_numeric_values(row)
+        values = self._extract_numeric_values(row)
 
-        if nums:
+        if len(values) >= 6:
 
-            value = nums[-1]
+            inflation = values[-1]
 
             logger.info(
-                "Inflation extracted=%s",
-                value
+                "Inflation=%s",
+                inflation
             )
 
-            return value
+            return inflation
 
         return None
 
@@ -486,13 +484,13 @@ class MacroPdfExtractor:
         Expected: ~129.43 (March 2026)
         """
         df = self._find_table_by_keywords(
-            ["foreign exchange","us dollar"]
+            ["us dollar"]
         )
 
         if df is None:
             return None
 
-        row = self._extract_month_row(
+        row = self._find_row_by_month(
             df,
             self._report_date.strftime("%B")
         )
@@ -504,7 +502,14 @@ class MacroPdfExtractor:
 
         if nums:
 
-            return nums[0]
+            usd = nums[0]
+
+            logger.info(
+                "USD/KES=%s",
+                usd
+            )
+
+            return usd
 
         return None
 
@@ -515,14 +520,13 @@ class MacroPdfExtractor:
         Expected: ~8.75 (March 2026)
         """
         df = self._find_table_by_keywords(
-            ["interest rate","cbr"],
-            min_matches=2
+            ["interest rate", "cbr"]
         )
 
         if df is None:
             return None
 
-        row = self._extract_month_row(
+        row = self._find_row_by_month(
             df,
             self._report_date.strftime("%B")
         )
@@ -532,12 +536,19 @@ class MacroPdfExtractor:
 
         nums = self._extract_numeric_values(row)
 
-        if nums:
+        if len(nums) >= 4:
 
-            return nums[-2]
+            cbr = nums[3]
+
+            logger.info(
+                "CBR=%s",
+                cbr
+            )
+
+            return cbr
 
         return None
-
+    
     def extract_fuel_prices(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
         """
         Extract retail fuel prices from the energy/pump prices section.
@@ -548,7 +559,8 @@ class MacroPdfExtractor:
         Expected: (179.35, 167.72, 153.96)
         """
         df = self._find_table_by_keywords(
-            keywords=["petrol", "diesel", "kerosene", "pump", "fuel", "energy"],
+            keywords=["average retail prices", "petroleum","premium motor gasoline"
+                    ],
             min_matches=3,
         )
         if df is None:
@@ -593,38 +605,35 @@ class MacroPdfExtractor:
         Expected: (3432, 195, 3231)
         """
         df = self._find_table_by_keywords(
-            keywords=["nse", "nairobi", "securities", "stock", "market capitaliz"],
-            min_matches=3,
+            ["nse", "market capitalization"]
         )
+
         if df is None:
-            logger.warning("extract_nse_market_data: NSE table not found.")
-            return None, None, None
+            return None,None,None
 
-        nse20: Optional[float] = None
-        nasi: Optional[float] = None
-        market_cap: Optional[float] = None
+        row = self._find_row_by_month(
+            df,
+            self._report_date.strftime("%B")
+        )
 
-        for _, row in df.iterrows():
-            row_lower = self._row_to_text(row).lower()
+        if row is None:
+            return None,None,None
 
-            if nse20 is None and "nse 20" in row_lower:
-                nse20 = self._extract_last_numeric(row)
-                if nse20:
-                    logger.info("NSE20 extracted: %.2f", nse20)
+        nums = self._extract_numeric_values(row)
 
-            elif nasi is None and "nasi" in row_lower:
-                nasi = self._extract_last_numeric(row)
-                if nasi:
-                    logger.info("NASI extracted: %.2f", nasi)
+        if len(nums)>=7:
 
-            elif market_cap is None and (
-                "market cap" in row_lower or "capitaliz" in row_lower
-            ):
-                market_cap = self._extract_last_numeric(row)
-                if market_cap:
-                    logger.info("Market cap extracted: %.2f", market_cap)
+            nse20=nums[0]
+            nasi=nums[1]
+            market_cap=nums[-1]
 
-        return nse20, nasi, market_cap
+            return (
+                nse20,
+                nasi,
+                market_cap
+            )
+
+        return None,None,None
 
     def extract_money_supply(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
         """
@@ -800,20 +809,22 @@ class MacroPdfExtractor:
                     + page_text
                 ).lower()
 
-                matches=sum(
-                    keyword.lower() in combined
+                score = sum(
+                    1
                     for keyword in keywords
+                    if keyword.lower() in combined
                 )
 
                 logger.info(
                     "%s score=%d",
                     name,
-                    matches
+                    score
                 )
 
-                if matches>best_score:
-                    best_score=matches
-                    best_df=df
+                if score > best_score and score >= min_matches:
+                    best_score = score
+                    best_df = df
+
 
             if best_score>=min_matches:
 
@@ -826,6 +837,26 @@ class MacroPdfExtractor:
                 return best_df
 
             return None
+    
+    def _find_row_by_month(
+        self,
+        df: pd.DataFrame,
+        month: str
+    ) -> Optional[pd.Series]:
+
+        month = month.lower()
+
+        for _, row in df.iterrows():
+
+            row_text = " ".join(
+                str(x).lower()
+                for x in row.values
+            )
+
+            if month in row_text:
+                return row
+
+        return None
     
     def _extract_month_row(
         self,
@@ -876,32 +907,37 @@ class MacroPdfExtractor:
     
     def _extract_numeric_values(
         self,
-        row: pd.Series
+        data: pd.Series
     )->list[float]:
 
-        values=[]
+        text = " ".join(
+            str(x)
+            for x in data
+        )
 
-        for value in row:
+        nums = re.findall(
+            r"(?<!\d)(\d{2,6}(?:,\d{3})*(?:\.\d+)?)",
+            text
+        )
 
-            text = str(value)
+        cleaned=[]
 
-            matches = re.findall(
-                r"[-+]?\d+(?:,\d+)*(?:\.\d+)?",
-                text
-            )
+        for n in nums:
 
-            for m in matches:
+            try:
 
-                try:
-                    values.append(
-                        float(
-                            m.replace(",","")
-                        )
-                    )
-                except:
-                    pass
+                value=float(
+                    n.replace(",","")
+                )
 
-        return values
+                # Remove obvious garbage
+                if value > 10:
+                    cleaned.append(value)
+
+            except Exception:
+                pass
+
+        return cleaned
 
     @staticmethod
     def _extract_first_numeric(row: pd.Series) -> Optional[float]:

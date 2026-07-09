@@ -23,7 +23,17 @@ class MacroData(Base):
 
     usd_kes_rate = Column(Float)
 
-    policy_signal = Column(String(255))
+    euro_kes_rate = Column(Float)
+
+    pounds_kes_rate = Column(Float)
+     
+    month = Column(String, index=True)
+
+    year = Column(String, index=True)
+
+    fuel_trend = Column(Float)
+
+    inflation_trend = Column(Float)
 
     timestamp = Column(DateTime(timezone=True), 
                        default=datetime.now(ZoneInfo("Africa/Nairobi")))

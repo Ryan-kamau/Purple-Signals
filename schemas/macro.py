@@ -10,8 +10,12 @@ class MacroDataBase(BaseModel):
     fuel_price: float
     cbk_rate: float
     usd_kes_rate: float
-    policy_signal: str
-
+    euro_kes_rate: float
+    pounds_kes_rate: float
+    month: str
+    year: str
+    fuel_trend: float
+    inflation_trend: float
 
 
 class MacroDataCreate(MacroDataBase):

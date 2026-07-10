@@ -29,8 +29,6 @@ class Headline(Base):
 
     sentiment_score = Column(Float)
 
-    sentiment_label = Column(String(60), nullable=True)
-
     published_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(

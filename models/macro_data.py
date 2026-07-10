@@ -27,9 +27,9 @@ class MacroData(Base):
 
     pounds_kes_rate = Column(Float)
      
-    month = Column(String, index=True)
+    month = Column(String(20), index=True)
 
-    year = Column(String, index=True)
+    year = Column(String(20), index=True)
 
     fuel_trend = Column(Float)
 

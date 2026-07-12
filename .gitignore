@@ -9,3 +9,5 @@ __pycache__/
 *.pyd
 #environment variables
 .env
+__temp__/
+temp/

@@ -17,30 +17,43 @@ Pipeline position:
     Individual table extractors (CBR / Inflation / Exchange / Fuel)
         │
         ▼
-    Structured dictionaries  {"status", "report_date", "data": [...]}
+    Structured dictionaries
+        {"table_name", "report_date", "status", "source_url", "data": [...]}
         │
         ▼
-    MacroService  (normalize -> merge -> analytics -> upsert)
+    MacroService
+        extract
+        → validate structure (shape only, not extraction success)
+        → propagate extractor-level failures (status != "success")
+        → normalize
+        → persist (upsert, "never overwrite real data with None")
+        → classify rows as inserted / updated / unchanged
+        → compute trends (only for inserted/updated rows, batched)
+        → single commit
+        → build service response
         │
         ▼
     MacroData ORM  ->  MySQL
 
 Responsibilities:
   - Call the KNBS extraction layer (never parse PDFs itself)
-  - Validate extractor responses
+  - Validate extractor response *structure*, independent of extraction outcome
+  - Propagate extractor-level failures with their original metadata intact
   - Normalize extracted records (types, whitespace, casing)
-  - Merge per-extractor records into (month, year) keyed rows
   - Upsert into MacroData with a "never overwrite real data with None" rule
-  - Compute derived analytics (inflation_trend, fuel_trend)
-  - Persist using an injected SQLAlchemy Session
+  - Track which rows were inserted, updated, or left unchanged
+  - Compute derived analytics (inflation_trend, fuel_trend) only for rows
+    that actually changed, using batched lookups
+  - Persist using an injected SQLAlchemy Session, one transaction per run
   - Return structured, JSON-serialisable dicts — never raw ORM objects
 
 No FastAPI routes, no HTTP concerns, no PDF/table parsing live here.
 """
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -53,11 +66,65 @@ logger = logging.getLogger(__name__)
 NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
 
 # Canonical month ordering — used to walk backwards to the "previous month"
-# for trend calculations without depending on report_date.
+# for trend calculations without depending on report_date. Isolated here
+# so month/year-specific logic doesn't leak into persistence or response
+# building; a future non-monthly dataset would only need its own key
+# resolver, not a rewrite of the pipeline.
 MONTH_ORDER: list[str] = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
 ]
+
+# Single source of truth for "extractor field -> MacroData column".
+# The registry below only references this; nothing else in the service
+# should hardcode a field mapping.
+FIELD_MAPS: dict[str, dict[str, str]] = {
+    "inflation": {"kenya_inflation": "inflation"},
+    "exchange": {
+        "usd": "usd_kes_rate",
+        "pound_sterling": "pounds_kes_rate",
+        "euro": "euro_kes_rate",
+    },
+    "cbr": {"cbr": "cbk_rate"},
+    "fuel": {"diesel_price": "fuel_price"},
+}
+
+# Structural keys every extractor response must carry, regardless of
+# whether extraction itself succeeded.
+_REQUIRED_RESPONSE_KEYS = ("table_name", "report_date", "status", "source_url", "data")
+
+
+# ---------------------------------------------------------------------------
+# Persistence result container
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PersistStats:
+    """
+    Classifies every MacroData row processed by `_persist_records()` into
+    exactly one of three buckets, so callers can report accurate save
+    counts (`rows_saved = inserted + updated`) and skip trend
+    recomputation for rows that didn't actually change.
+
+    A row is:
+      - inserted:  a brand-new MacroData object was created.
+      - updated:   the row already existed and at least one column changed.
+      - unchanged: the row already existed and nothing changed.
+    """
+
+    inserted: list[MacroData] = field(default_factory=list)
+    updated: list[MacroData] = field(default_factory=list)
+    unchanged: list[MacroData] = field(default_factory=list)
+
+    @property
+    def records(self) -> list[MacroData]:
+        """Every row processed, regardless of whether it changed."""
+        return self.inserted + self.updated + self.unchanged
+
+    @property
+    def changed_records(self) -> list[MacroData]:
+        """Only rows that were actually inserted or updated."""
+        return self.inserted + self.updated
 
 
 class MacroService:
@@ -69,11 +136,11 @@ class MacroService:
         keeps this class trivially testable (pass a fake Session/extractor).
       - `_registry` is built once per instance and is the single source of
         truth for "which extractor feeds which MacroData columns". Adding
-        a new macro indicator (money supply, reserves, etc.) means adding
-        one registry entry — no orchestration code changes.
+        a new macro indicator means adding one FIELD_MAPS entry and one
+        registry entry — no orchestration code changes.
       - All helper methods are private (leading underscore) and each does
-        exactly one job (validate / normalize / merge / persist / trend),
-        so the public refresh_* methods read like a checklist.
+        exactly one job, so the public refresh_* methods read like a
+        checklist.
 
     Example:
         service = MacroService(db)
@@ -92,41 +159,27 @@ class MacroService:
         self._registry = self._build_registry()
 
     # ------------------------------------------------------------------
-    # Registry — the only place that knows "extractor -> MacroData fields"
+    # Registry — configuration only. Field mappings live in FIELD_MAPS;
+    # this just wires each key to its bound extractor method.
     # ------------------------------------------------------------------
 
     def _build_registry(self) -> dict[str, dict[str, Any]]:
-        """
-        Build the extractor registry.
-
-        Each entry maps a short key to:
-          - "method":     the bound KNBSExtractor.get_*() callable
-          - "field_map":  raw extractor field name -> MacroData column name
-
-        Extending the pipeline (e.g. adding Foreign Reserves) means adding
-        one more entry here — refresh_macro_data() and _run_single() need
-        no changes.
-        """
         return {
             "inflation": {
                 "method": self._extractor.get_inflation,
-                "field_map": {"kenya_inflation": "inflation"},
+                "field_map": FIELD_MAPS["inflation"],
             },
             "exchange": {
                 "method": self._extractor.get_exchange_rates,
-                "field_map": {
-                    "usd": "usd_kes_rate",
-                    "pound_sterling": "pounds_kes_rate",
-                    "euro": "euro_kes_rate",
-                },
+                "field_map": FIELD_MAPS["exchange"],
             },
             "cbr": {
                 "method": self._extractor.get_cbr,
-                "field_map": {"cbr": "cbk_rate"},
+                "field_map": FIELD_MAPS["cbr"],
             },
             "fuel": {
                 "method": self._extractor.get_fuels,
-                "field_map": {"diesel_price": "fuel_price"},
+                "field_map": FIELD_MAPS["fuel"],
             },
         }
 
@@ -158,10 +211,9 @@ class MacroService:
         Each sub-extractor upserts its own fields into MacroData rows keyed
         by (month, year). Because updates never overwrite a real value with
         None, running all four in sequence converges to the same merged
-        state a single combined pass would produce — without needing to
-        hold everything in memory at once.
+        state a single combined pass would produce.
 
-        One failing table (e.g. fuel prices) does not abort the others.
+        One failing extractor does not abort the others.
 
         Returns:
             Aggregate response with overall status ("success" |
@@ -182,8 +234,11 @@ class MacroService:
 
     def _run_single(self, registry_key: str, pdf_url: str) -> dict[str, Any]:
         """
-        Full pipeline for one extractor: extract -> validate -> normalize
-        -> merge -> persist -> compute trends -> serialise.
+        Full pipeline for one extractor:
+
+            extract -> validate structure -> propagate extractor failure
+            -> normalize -> persist (insert/update/unchanged) -> compute
+            trends (changed rows only) -> single commit -> serialise
 
         Args:
             registry_key: Key into self._registry (e.g. "inflation").
@@ -195,6 +250,7 @@ class MacroService:
         entry = self._registry[registry_key]
         logger.info("Loading %s extractor...", registry_key)
 
+        # --- Call the extractor ------------------------------------------
         try:
             raw_response = entry["method"](pdf_url)
         except Exception as exc:  # noqa: BLE001
@@ -204,82 +260,105 @@ class MacroService:
                 report_date=None,
             )
 
-        is_valid, error = self._validate_response(raw_response)
-        if not is_valid:
-            logger.error("%s extraction validation failed: %s", registry_key, error)
-            return self._failure_response(message=error, report_date=None)
+        # --- Validate structure only — NOT extraction success ------------
+        is_valid_structure, structure_error = self._validate_structure(raw_response)
+        if not is_valid_structure:
+            logger.error("%s response failed structural validation: %s", registry_key, structure_error)
+            return self._failure_response(
+                message=structure_error,
+                report_date=raw_response.get("report_date") if isinstance(raw_response, dict) else None,
+                table_name=raw_response.get("table_name") if isinstance(raw_response, dict) else None,
+                source_url=raw_response.get("source_url") if isinstance(raw_response, dict) else None,
+            )
 
-        normalized_records = self._normalize_records(
-            raw_response["data"], entry["field_map"]
-        )
+        table_name = raw_response.get("table_name")
+        report_date = raw_response.get("report_date")
+        source_url = raw_response.get("source_url")
+        extractor_status = raw_response.get("status")
+        data = raw_response.get("data") or []
+
+        # --- Propagate extractor-level failure, don't mask it -------------
+        if extractor_status != "success":
+            logger.warning(
+                "%s extractor reported failure (status=%s); propagating.",
+                registry_key, extractor_status,
+            )
+            return self._failure_response(
+                message=f"{registry_key} extractor reported status='{extractor_status}'.",
+                report_date=report_date,
+                table_name=table_name,
+                source_url=source_url,
+            )
+
+        # --- A successful extractor with no rows is not an error ----------
+        if not data:
+            logger.info("%s extractor succeeded but returned no rows.", registry_key)
+            return self._success_response(
+                message=f"{registry_key.title()} extractor returned no rows.",
+                report_date=report_date,
+                table_name=table_name,
+                source_url=source_url,
+                stats=PersistStats(),
+            )
+
+        # --- Normalize (no merge stage — extractor already yields one
+        #     record per month/year) -------------------------------------
+        normalized_records = self._normalize_records(data, entry["field_map"])
         logger.info("Normalized %d records for %s", len(normalized_records), registry_key)
 
-        merged = self._merge_records(normalized_records)
-        logger.info("Merged %d monthly records", len(merged))
-
-        report_date = raw_response.get("report_date")
-
+        # --- Persist + trends in a single transaction ----------------------
         try:
-            saved_records = self._persist_records(merged, report_date)
+            stats = self._persist_and_compute(normalized_records, report_date)
         except Exception as exc:  # noqa: BLE001
             self._db.rollback()
             logger.error("Database transaction rolled back for %s: %s", registry_key, exc)
             return self._failure_response(
                 message="Database transaction rolled back.",
                 report_date=report_date,
+                table_name=table_name,
+                source_url=source_url,
             )
-
-        self._compute_and_persist_trends(saved_records)
 
         return self._success_response(
             message=f"{registry_key.title()} data updated successfully",
-            rows_saved=len(saved_records),
             report_date=report_date,
-            records=saved_records,
+            table_name=table_name,
+            source_url=source_url,
+            stats=stats,
         )
 
     # ------------------------------------------------------------------
-    # Validation
+    # Structural validation (shape only — never opines on extraction
+    # success/failure or on whether data is non-empty)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _validate_response(response: Any) -> tuple[bool, Optional[str]]:
+    def _validate_structure(response: Any) -> tuple[bool, Optional[str]]:
         """
-        Validate a raw KNBSExtractor response before any processing.
+        Validate that an extractor response has the expected shape.
 
-        Checks: response exists, is a dict, status == "success",
-        report_date exists, data exists and is a non-empty list.
+        Deliberately does NOT check response["status"] == "success" and
+        does NOT require response["data"] to be non-empty — those are
+        extraction-outcome concerns, handled separately in _run_single so
+        extractor failures/empty results are propagated, not discarded.
 
         Returns:
             (is_valid, error_message | None)
         """
-        if not response:
-            return False, "Extractor returned no response."
-
         if not isinstance(response, dict):
             return False, "Extractor response is not a dictionary."
 
-        if response.get("status") != "success":
-            return False, f"Extractor status is '{response.get('status')}', expected 'success'."
+        missing = [key for key in _REQUIRED_RESPONSE_KEYS if key not in response]
+        if missing:
+            return False, f"Extractor response missing required keys: {missing}"
 
-        if not response.get("report_date"):
-            return False, "Extractor response is missing report_date."
-
-        data = response.get("data")
-
-        if data is None:
-            return False, "Extractor response is missing 'data'."
-
-        if not isinstance(data, list):
+        if not isinstance(response.get("data"), list):
             return False, "Extractor response 'data' is not a list."
-
-        if not data:
-            return False, "Extractor response 'data' is empty."
 
         return True, None
 
     # ------------------------------------------------------------------
-    # Normalization
+    # Normalization — split into small, single-purpose helpers
     # ------------------------------------------------------------------
 
     def _normalize_records(
@@ -288,36 +367,75 @@ class MacroService:
         """
         Normalize raw extractor rows into MacroData-column-named dicts.
 
-        Args:
-            raw_data:  List of raw record dicts from one extractor
-                       (each has "month", "year", plus extractor-specific keys).
-            field_map: Maps extractor field name -> MacroData column name,
-                       e.g. {"kenya_inflation": "inflation"}.
+        Delegates to:
+          - _validate_record(): is this row even usable?
+          - _normalize_record(): clean month/year into a base dict
+          - _map_record_fields(): extractor field -> MacroData column,
+            with numeric coercion and missing-field warnings
 
-        Returns:
-            List of normalized dicts: {"month": ..., "year": ..., <column>: value, ...}
-            Records with no usable month are skipped.
+        Records that fail validation or have no usable month are skipped —
+        identical behavior to before, just decomposed.
         """
         normalized: list[dict[str, Any]] = []
 
         for raw_record in raw_data:
-            month = self._normalize_month(raw_record.get("month"))
-            year = self._normalize_year(raw_record.get("year"))
+            if not self._validate_record(raw_record):
+                logger.debug("Skipping invalid record: %s", raw_record)
+                continue
 
-            if not month or month not in MONTH_ORDER:
+            base = self._normalize_record(raw_record)
+            if base is None:
                 logger.debug("Skipping record with invalid month: %s", raw_record)
                 continue
 
-            normalized_record: dict[str, Any] = {"month": month, "year": year}
-
-            for raw_field, column_name in field_map.items():
-                normalized_record[column_name] = self._normalize_numeric(
-                    raw_record.get(raw_field)
-                )
-
-            normalized.append(normalized_record)
+            mapped_fields = self._map_record_fields(raw_record, field_map)
+            normalized.append({**base, **mapped_fields})
 
         return normalized
+
+    @staticmethod
+    def _validate_record(raw_record: Any) -> bool:
+        """Minimal shape check: must be a dict carrying a month value."""
+        return isinstance(raw_record, dict) and bool(raw_record.get("month"))
+
+    def _normalize_record(self, raw_record: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Clean month/year into the base of a normalized record."""
+        month = self._normalize_month(raw_record.get("month"))
+        year = self._normalize_year(raw_record.get("year"))
+
+        if not month or month not in MONTH_ORDER:
+            return None
+
+        return {"month": month, "year": year}
+
+    def _map_record_fields(
+        self, raw_record: dict[str, Any], field_map: dict[str, str]
+    ) -> dict[str, Any]:
+        """
+        Apply extractor-field -> MacroData-column mapping with numeric
+        coercion.
+
+        If an expected extractor field is absent from the raw record, a
+        WARNING is logged (e.g. "Expected extractor field 'diesel_price'
+        missing for March 2026.") — this usually signals an
+        extractor/service field-mapping mismatch worth investigating.
+        The mapped value still falls back to None so behaviour stays
+        backwards compatible; no exception is raised.
+        """
+        mapped: dict[str, Any] = {}
+
+        for raw_field, column_name in field_map.items():
+            if raw_field not in raw_record:
+                logger.warning(
+                    "Expected extractor field '%s' missing for %s %s.",
+                    raw_field,
+                    raw_record.get("month"),
+                    raw_record.get("year"),
+                )
+
+            mapped[column_name] = self._normalize_numeric(raw_record.get(raw_field))
+
+        return mapped
 
     @staticmethod
     def _normalize_month(value: Any) -> Optional[str]:
@@ -360,100 +478,160 @@ class MacroService:
             return None
 
     # ------------------------------------------------------------------
-    # Merging
+    # Persistence (upsert) + trends — one transaction
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _merge_records(normalized_records: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    def _persist_and_compute(
+        self,
+        records: list[dict[str, Any]],
+        report_date: Optional[str],
+    ) -> PersistStats:
         """
-        Merge normalized records into an in-memory lookup keyed by (month, year).
-
-        A single extractor's records never collide on the same month twice,
-        but this still guards against duplicate rows within one PDF table.
-
-        Returns:
-            {(month, year): {"month": ..., "year": ..., <column>: value, ...}}
+        Persist normalized records and compute trends in a single
+        transaction: persist -> classify (insert/update/unchanged) ->
+        compute trends for changed rows only -> one commit.
         """
-        merged: dict[tuple[str, str], dict[str, Any]] = {}
+        parsed_report_date = self._parse_report_date(report_date)
 
-        for record in normalized_records:
-            key = (record["month"], record["year"])
-            entry = merged.setdefault(key, {"month": record["month"], "year": record["year"]})
+        stats = self._persist_records(records, parsed_report_date)
 
-            for field, value in record.items():
-                if field in ("month", "year"):
-                    continue
-                entry[field] = value
+        # Trends only matter for rows whose values actually changed —
+        # unchanged rows already have whatever trend they had before.
+        self._apply_trends(stats.changed_records)
 
-        return merged
+        self._db.commit()
 
-    # ------------------------------------------------------------------
-    # Persistence (upsert)
-    # ------------------------------------------------------------------
+        for record in stats.records:
+            self._db.refresh(record)
+
+        logger.info(
+            "Committed: Inserted=%d Updated=%d Unchanged=%d",
+            len(stats.inserted), len(stats.updated), len(stats.unchanged),
+        )
+        return stats
 
     def _persist_records(
         self,
-        merged: dict[tuple[str, str], dict[str, Any]],
-        report_date: Optional[str],
-    ) -> list[MacroData]:
+        records: list[dict[str, Any]],
+        parsed_report_date: Optional[datetime],
+    ) -> PersistStats:
         """
-        Upsert merged (month, year) records into MacroData.
+        Upsert normalized records into MacroData, one row per (month, year).
 
-        Update rule: only overwrite a column when the new value is not
-        None. This is what lets refresh_inflation(), refresh_fuel_prices(),
-        etc. be called independently over time and still converge to one
-        fully populated row per (month, year), instead of one call erasing
-        another's fields.
+        Existing rows are fetched in a single batched query (keyed on the
+        exact (month, year) pairs being processed) rather than one query
+        per record, and every processed row is classified as inserted,
+        updated, or unchanged so callers can report accurate save counts.
 
-        Args:
-            merged:      {(month, year): {column: value, ...}}
-            report_date: Report-level date string (e.g. "March 2026") used
-                         to populate/refresh the report_date column.
+        Update rule unchanged: only overwrite a column when the new value
+        is not None — this is what lets refresh_inflation(),
+        refresh_fuel_prices(), etc. be called independently over time and
+        still converge to one fully populated row per (month, year).
 
-        Returns:
-            List of persisted (added or updated) MacroData ORM objects.
+        No merge stage: the extractor already yields at most one record
+        per (month, year), so records are persisted directly.
 
-        Raises:
-            Exception: Propagated to the caller, which rolls back and
-                       reports failure. Callers must not assume partial
-                       writes are safe to keep.
+        Flushes (does not commit) so callers can layer additional
+        in-transaction work — e.g. trend computation — before the single
+        commit in `_persist_and_compute`.
         """
-        parsed_report_date = self._parse_report_date(report_date)
-        saved: list[MacroData] = []
+        stats = PersistStats()
 
-        for (month, year), fields in merged.items():
-            existing: Optional[MacroData] = (
-                self._db.query(MacroData)
-                .filter(MacroData.month == month, MacroData.year == year)
-                .first()
-            )
+        if not records:
+            return stats
+
+        keys = [(record["month"], record["year"]) for record in records]
+        existing_lookup = self._fetch_existing_records(keys)
+
+        for record in records:
+            month = record["month"]
+            year = record["year"]
+            fields = {k: v for k, v in record.items() if k not in ("month", "year")}
+
+            existing: Optional[MacroData] = existing_lookup.get((month, year))
 
             if existing:
-                logger.info("Updating existing record %s %s", month, year)
+                changed = False
+
                 for column, value in fields.items():
+                    current_value = getattr(existing, column)
+
+                    # Never overwrite an existing non-null value.
+                    if current_value is not None:
+                        continue
+
                     if value is not None:
                         setattr(existing, column, value)
-                if parsed_report_date is not None:
+                        changed = True
+
+                # Only set report_date if it hasn't been set already.
+                if existing.report_date is None and parsed_report_date is not None:
                     existing.report_date = parsed_report_date
-                saved.append(existing)
+                    changed = True
+
+                if changed:
+                    logger.debug("Updated %s %s", month, year)
+                    stats.updated.append(existing)
+                else:
+                    logger.debug("No missing values to fill for %s %s", month, year)
+                    stats.unchanged.append(existing)
             else:
-                logger.info("Inserted %s %s", month, year)
+                logger.debug("Inserting new record for %s %s", month, year)
                 new_record = MacroData(
                     month=month,
                     year=year,
                     report_date=parsed_report_date,
-                    **{k: v for k, v in fields.items() if k not in ("month", "year")},
+                    **fields,
                 )
                 self._db.add(new_record)
-                saved.append(new_record)
+                stats.inserted.append(new_record)
 
-        self._db.commit()
+        self._db.flush()
 
-        for record in saved:
-            self._db.refresh(record)
+        logger.info(
+            "Persistence summary: Inserted=%d Updated=%d Unchanged=%d",
+            len(stats.inserted), len(stats.updated), len(stats.unchanged),
+        )
 
-        logger.info("Committed %d records", len(saved))
-        return saved
+        return stats
+
+    def _fetch_existing_records(
+        self, keys: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], MacroData]:
+        """
+        Batch-fetch every existing MacroData row for the given (month, year)
+        keys in a single query, instead of one query per record.
+
+        Mirrors the over-fetch-then-filter approach used in
+        `_fetch_previous_month_records`: queries by month-set x year-set
+        (portable across backends, since not every backend supports
+        multi-column IN-tuple filters cleanly) and then filters down to
+        the exact pairs requested.
+
+        Args:
+            keys: (month, year) pairs for every record about to be persisted.
+
+        Returns:
+            {(month, year): MacroData} for every key that already exists.
+        """
+        if not keys:
+            return {}
+
+        unique_keys = set(keys)
+        months = {month for month, _year in unique_keys}
+        years = {year for _month, year in unique_keys}
+
+        candidates = (
+            self._db.query(MacroData)
+            .filter(MacroData.month.in_(months), MacroData.year.in_(years))
+            .all()
+        )
+
+        return {
+            (candidate.month, candidate.year): candidate
+            for candidate in candidates
+            if (candidate.month, candidate.year) in unique_keys
+        }
 
     @staticmethod
     def _parse_report_date(report_date: Optional[str]) -> Optional[datetime]:
@@ -475,103 +653,181 @@ class MacroService:
             return None
 
     # ------------------------------------------------------------------
-    # Derived analytics
+    # Derived analytics — batched to avoid N+1 queries
     # ------------------------------------------------------------------
 
-    def _compute_and_persist_trends(self, records: list[MacroData]) -> None:
+    def _apply_trends(self, records: list[MacroData]) -> None:
         """
-        Compute inflation_trend and fuel_trend for each record by comparing
-        against the chronologically previous month in the database.
+        Compute inflation_trend and fuel_trend for each record in-memory,
+        using a single batched query for all required previous-month rows
+        instead of one query per record.
+
+        Only called with inserted/updated records — unchanged rows are
+        skipped by the caller since their values (and therefore their
+        trends) haven't moved.
 
         trend = current_value - previous_value
         If no previous month record exists (or the relevant value is
         missing on either side), the trend is left as None.
         """
+        if not records:
+            return
+
+        needed_keys: set[tuple[str, str]] = set()
         for record in records:
-            previous = self._find_previous_month_record(record.month, record.year)
+            key = self._previous_month_key(record.month, record.year)
+            if key is not None:
+                needed_keys.add(key)
+
+        previous_lookup = self._fetch_previous_month_records(needed_keys)
+
+        for record in records:
+            key = self._previous_month_key(record.month, record.year)
+            previous = previous_lookup.get(key) if key else None
 
             if previous is None:
                 record.inflation_trend = None
                 record.fuel_trend = None
                 continue
 
-            if record.inflation is not None and previous.inflation is not None:
-                record.inflation_trend = round(record.inflation - previous.inflation, 4)
-            else:
-                record.inflation_trend = None
+            record.inflation_trend = (
+                round(record.inflation - previous.inflation, 4)
+                if record.inflation is not None and previous.inflation is not None
+                else None
+            )
+            record.fuel_trend = (
+                round(record.fuel_price - previous.fuel_price, 4)
+                if record.fuel_price is not None and previous.fuel_price is not None
+                else None
+            )
 
-            if record.fuel_price is not None and previous.fuel_price is not None:
-                record.fuel_trend = round(record.fuel_price - previous.fuel_price, 4)
-            else:
-                record.fuel_trend = None
+        logger.info("Computed inflation and fuel trends for %d record(s)", len(records))
 
-        self._db.commit()
-
-        for record in records:
-            self._db.refresh(record)
-
-        logger.info("Computed inflation trends")
-        logger.info("Computed fuel trends")
-
-    def _find_previous_month_record(self, month: str, year: str) -> Optional[MacroData]:
+    @staticmethod
+    def _previous_month_key(month: str, year: str) -> Optional[tuple[str, str]]:
         """
-        Look up the MacroData row for the month immediately preceding
-        (month, year), walking December -> January across a year boundary.
+        Resolve the (month, year) key immediately preceding (month, year),
+        walking December -> January across a year boundary.
+
+        Isolated as its own helper so the "monthly" assumption stays in
+        one place rather than spread across query logic.
 
         Returns:
-            The previous month's MacroData row, or None if it doesn't
-            exist yet or `month` is not a recognised month name.
+            (previous_month, previous_year), or None if `month`/`year`
+            aren't recognisable.
         """
         if month not in MONTH_ORDER:
-            logger.debug("Unrecognised month '%s' — cannot compute trend.", month)
+            logger.debug("Unrecognised month '%s' — cannot resolve previous key.", month)
             return None
 
         try:
             year_int = int(year)
         except (TypeError, ValueError):
-            logger.debug("Unrecognised year '%s' — cannot compute trend.", year)
+            logger.debug("Unrecognised year '%s' — cannot resolve previous key.", year)
             return None
 
         index = MONTH_ORDER.index(month)
 
         if index == 0:
-            previous_month, previous_year = "December", str(year_int - 1)
-        else:
-            previous_month, previous_year = MONTH_ORDER[index - 1], str(year_int)
+            return "December", str(year_int - 1)
+        return MONTH_ORDER[index - 1], str(year_int)
 
-        return (
+    def _fetch_previous_month_records(
+        self, needed_keys: set[tuple[str, str]]
+    ) -> dict[tuple[str, str], MacroData]:
+        """
+        Batch-fetch every MacroData row needed for trend computation in a
+        single query, instead of one query per record.
+
+        Over-fetches slightly (queries by month-set x year-set rather than
+        exact pair-set, since exact tuple matching isn't portable across
+        all backends) and then filters down to exact (month, year) keys —
+        cheap in-memory work that avoids N+1 round trips to the DB.
+
+        Args:
+            needed_keys: Set of (month, year) pairs required for trends.
+
+        Returns:
+            {(month, year): MacroData} for every key that exists in the DB.
+        """
+        if not needed_keys:
+            return {}
+
+        months = {month for month, _year in needed_keys}
+        years = {year for _month, year in needed_keys}
+
+        candidates = (
             self._db.query(MacroData)
-            .filter(MacroData.month == previous_month, MacroData.year == previous_year)
-            .first()
+            .filter(MacroData.month.in_(months), MacroData.year.in_(years))
+            .all()
         )
 
+        return {
+            (candidate.month, candidate.year): candidate
+            for candidate in candidates
+            if (candidate.month, candidate.year) in needed_keys
+        }
+
     # ------------------------------------------------------------------
-    # Response builders
+    # Response builders — now consistent with extractor response shape
     # ------------------------------------------------------------------
 
     def _success_response(
         self,
         *,
         message: str,
-        rows_saved: int,
         report_date: Optional[str],
-        records: list[MacroData],
+        table_name: Optional[str] = None,
+        source_url: Optional[str] = None,
+        stats: PersistStats,
     ) -> dict[str, Any]:
+        """
+        Build a success response.
+
+        rows_saved reflects only rows that actually changed
+        (inserted + updated) — unchanged rows are reported separately via
+        rows_unchanged and are never counted as "saved".
+        """
+        rows_inserted = len(stats.inserted)
+        rows_updated = len(stats.updated)
+        rows_unchanged = len(stats.unchanged)
+
         return {
             "status": "success",
             "message": message,
-            "rows_saved": rows_saved,
+            "rows_saved": rows_inserted + rows_updated,
+            "rows_inserted": rows_inserted,
+            "rows_updated": rows_updated,
+            "rows_unchanged": rows_unchanged,
             "report_date": report_date,
-            "data": [self._serialize(record) for record in records],
+            "table_name": table_name,
+            "source_url": source_url,
+            "data": [self._serialize(record) for record in stats.records],
         }
 
     @staticmethod
-    def _failure_response(message: str, report_date: Optional[str]) -> dict[str, Any]:
+    def _failure_response(
+        message: str,
+        report_date: Optional[str],
+        table_name: Optional[str] = None,
+        source_url: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Build a failure response, whether the failure originated in the
+        service (structural/DB issue) or was propagated from the
+        extractor (status != "success"). Extractor metadata is always
+        preserved when available rather than discarded.
+
+        rows_inserted / rows_updated / rows_unchanged are intentionally
+        omitted from failure responses.
+        """
         return {
             "status": "failed",
             "message": message,
             "rows_saved": 0,
             "report_date": report_date,
+            "table_name": table_name,
+            "source_url": source_url,
             "data": [],
         }
 
@@ -585,7 +841,6 @@ class MacroService:
           - "partial_success" if at least one succeeded
           - "failed"          if none succeeded
         """
-        statuses = [result["status"] for result in results.values()]
         succeeded = [key for key, result in results.items() if result["status"] == "success"]
         failed = [key for key, result in results.items() if result["status"] != "success"]
 

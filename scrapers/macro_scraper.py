@@ -12,47 +12,64 @@ pipeline itself.
 Pipeline overview:
 
     PDF (local file or URL)
-     -> load_pdf
-     -> find_toc
-     -> parse_toc
-     -> find_table
-     -> locate_candidate_pages
-     -> extract_candidate_tables
-     -> select_best_table
-     -> (table-specific parser -- NOT implemented yet)
+     -> KNBSExtractor.get_pdf()            [cached]
+     -> KNBSExtractor.get_report_metadata() [cached]
+     -> KNBSExtractor.get_toc()             [cached: toc_page + toc_entries]
+     -> PipelineEngine.run()                [table-specific work only]
+        -> find_table
+        -> locate_candidate_pages
+        -> extract_candidate_tables
+        -> select_best_table
+     -> (table-specific parser)
      -> validate_output
      -> return results
 
-NOTE:
-- Table-specific parsing logic is intentionally NOT implemented yet.
-  All extractor classes are placeholders that call PipelineEngine.run() to
-  fetch the best-guess raw dataframe, but do not parse it into structured
-  records.
-- The pipeline supports being fed either a local PDF path OR a PDF URL.
-  When a URL is supplied, it is downloaded once at the start of the flow
-  via PDFManager.download_pdf(); every other function still operates on a
-  local pdf_path exactly as before.
+CACHING ARCHITECTURE (this revision):
+    KNBSExtractor is the single source of truth for everything that is
+    document-level and does not change between tables in the same PDF:
+
+        * local PDF path              (get_pdf)
+        * report metadata             (get_report_metadata)
+        * opened pdfplumber.PDF       (get_pdf_object)
+        * TOC page index              (get_toc_page)
+        * parsed TOC entries          (get_toc)
+
+    Every one of the above is computed exactly once per unique pdf_url and
+    reused by every table extractor (CBR / Inflation / Exchange / Fuel /
+    Stock Market) run against that same report. A KNBSContext dataclass
+    bundles all of this together and is what extractors actually consume.
+
+    PipelineEngine.run() no longer downloads a PDF or rebuilds the TOC --
+    it receives toc_entries + pdf_path and only does the table-specific
+    steps (find target table -> candidate pages -> extract -> score).
+
+    No table-parsing logic (parse_cbr_table, parse_inflation_table,
+    parse_exchange_dataframe, parse_fuel_table, scoring, validation,
+    TABLE_CONFIG) has been changed. This is purely a caching / plumbing
+    refactor.
 
 Architecture:
 
-    KNBSExtractor
+    KNBSExtractor                     <- owns the cache + shared collaborators
     │
-    ├── PDFManager
+    ├── PDFManager                    <- dumb I/O only, no caching
     │     ├── download_pdf()
     │     ├── load_pdf()
     │     ├── extract_report_date_from_url()
     │
-    ├── PipelineEngine
-    │     ├── find_toc()
-    │     ├── parse_toc()
+    ├── PipelineEngine                <- table-specific work only
+    │     ├── find_toc()              (still exists; called by KNBSExtractor)
+    │     ├── parse_toc()             (still exists; called by KNBSExtractor)
     │     ├── find_table()
     │     ├── locate_candidate_pages()
     │     ├── extract_candidate_tables()
     │     ├── score_table()
     │     ├── select_best_table()
-    │     └── run()
+    │     └── run()                   <- no longer touches TOC/PDF loading
     │
     ├── Validator
+    │
+    ├── KNBSContext (dataclass)       <- cached bundle handed to extractors
     │
     └── Extractors
           ├── CBRExtractor
@@ -64,14 +81,15 @@ Architecture:
 FUEL EXTRACTOR NOTE (see FuelExtractor below):
     Unlike the other extractors, FuelExtractor does NOT call
     PipelineEngine.run() end-to-end. It reuses PipelineEngine's individual
-    reusable steps (find_toc, parse_toc, find_table,
-    extract_candidate_tables) but replaces the generic candidate-page
-    window and generic scoring with fuel-specific logic, because the
-    generic 5-page window and generic keyword scoring were drifting into
-    neighboring tables such as "Consumption of Petroleum Fuels" (Table
-    15(c)) instead of "National Average Retail Prices for Selected Fuels
-    in Kenya". PipelineEngine itself is not modified, and no other
-    extractor is affected.
+    reusable steps (find_table, extract_candidate_tables) but replaces the
+    generic candidate-page window and generic scoring with fuel-specific
+    logic, because the generic 5-page window and generic keyword scoring
+    were drifting into neighboring tables such as "Consumption of
+    Petroleum Fuels" (Table 15(c)) instead of "National Average Retail
+    Prices for Selected Fuels in Kenya". PipelineEngine itself is not
+    modified, and no other extractor is affected. It now sources its TOC
+    page / TOC entries / page count from the shared KNBSExtractor cache
+    instead of recomputing them.
 """
 
 import logging
@@ -79,6 +97,7 @@ import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any, Optional
 from urllib.parse import urlparse, unquote
 
 import pdfplumber
@@ -114,9 +133,10 @@ class PDFManager:
         * load PDF
         * extract report date metadata
 
-    Kept together deliberately, rather than split into separate
-    PDFLoader / MetadataExtractor / PDFSourceManager classes, to avoid
-    unnecessary class explosion.
+    Deliberately stateless / cache-free. Every call does real work.
+    Caching (so the same PDF isn't downloaded twice) is owned by
+    KNBSExtractor, not here -- this class stays a thin, reusable I/O
+    utility that has no opinion about "have I done this before".
     """
 
     def __init__(self, temp_directory="temp"):
@@ -306,8 +326,10 @@ class PipelineEngine:
     """
     Holds the reusable, table-agnostic extraction backbone.
 
-    All internal logic below was moved as-is from the original module-level
-    functions; behavior is unchanged.
+    find_toc() / parse_toc() still live here (KNBSExtractor's caching
+    getters call them exactly once per PDF). run() itself, however, no
+    longer touches PDF loading or TOC parsing -- it is handed toc_entries
+    and pdf_path by the caller and only performs table-specific work.
     """
 
     def __init__(self, pdf_manager):
@@ -622,29 +644,33 @@ class PipelineEngine:
         return best_table
 
     # -----------------------------------------------------------------
-    # STEP 10: Main reusable extraction engine
+    # STEP 9: Main reusable extraction engine (table-specific work only)
     # -----------------------------------------------------------------
 
-    def run(self, pdf_path, target, keywords):
+    def run(self, pdf_path, toc_entries, target, keywords):
         """
-        Execute the full generic extraction pipeline for a given target table.
+        Execute the table-specific portion of the extraction pipeline for
+        a given target table.
+
+        Unlike the original implementation, this method does NOT load the
+        PDF or rebuild the TOC -- both are supplied by the caller
+        (KNBSExtractor's cached getters), since they are identical for
+        every table extracted from the same report. This method only does
+        the work that genuinely differs per target table:
+
+            find_table -> locate_candidate_pages -> extract_candidate_tables
+            -> select_best_table
 
         This function does NOT parse table contents into structured records.
         It only locates and returns the best-matching raw dataframe for the
         requested target table. Table-specific parsing is the responsibility
         of the individual extractor classes.
 
-        Pipeline:
-            load_pdf
-            -> find_toc
-            -> parse_toc
-            -> find_table
-            -> locate_candidate_pages
-            -> extract_candidate_tables
-            -> select_best_table
-
         Args:
-            pdf_path (str): Local filesystem path to the PDF file.
+            pdf_path (str): Local filesystem path to the PDF file (from
+                KNBSExtractor.get_pdf()).
+            toc_entries (list[dict]): Already-parsed TOC entries (from
+                KNBSExtractor.get_toc()).
             target (str): Target table name/description to search for.
             keywords (dict): Keyword weight mapping used for scoring
                 candidate tables.
@@ -655,22 +681,15 @@ class PipelineEngine:
         """
         logger.info("Running pipeline for target='%s'", target)
 
-        pdf = self.pdf_manager.load_pdf(pdf_path)
-
-        toc_page = self.find_toc(pdf)
-        entries = self.parse_toc(pdf, toc_page)
-        matched_entry = self.find_table(entries, target)
+        matched_entry = self.find_table(toc_entries, target)
 
         if matched_entry is None:
             logger.error("Pipeline aborted: no matching TOC entry for target '%s'", target)
-            pdf.close()
             return None
 
         candidate_pages = self.locate_candidate_pages(matched_entry["document_page"])
         candidate_tables = self.extract_candidate_tables(pdf_path, candidate_pages)
         selected_dataframe = self.select_best_table(candidate_tables, keywords)
-
-        pdf.close()
 
         return selected_dataframe
 
@@ -683,10 +702,6 @@ class Validator:
     """
     Owns generic, table-agnostic output validation.
     """
-
-    # -----------------------------------------------------------------
-    # STEP 9: Validation
-    # -----------------------------------------------------------------
 
     def validate_output(self, data):
         """
@@ -861,34 +876,66 @@ TABLE_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
+# KNBSContext -- the reusable, cached extraction context
+# ---------------------------------------------------------------------------
+#
+# Bundles everything that is identical for every table extracted from the
+# same KNBS report. Built lazily by KNBSExtractor and handed to every
+# table-specific extractor so none of them ever re-download the PDF or
+# re-parse the TOC.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class KNBSContext:
+    """
+    Cached, document-level extraction context for a single KNBS PDF.
+
+    Attributes:
+        pdf_path (str): Local filesystem path to the downloaded PDF.
+        pdf (pdfplumber.PDF): The opened pdfplumber PDF object.
+        report_metadata (dict): {"source_url", "report_date", "month", "year"}.
+        toc_page (int | None): Zero-based page index of the TOC.
+        toc_entries (list[dict]): Parsed TOC entries.
+        source_url (str): The original PDF URL this context was built for.
+    """
+    pdf_path: str
+    pdf: "pdfplumber.PDF"
+    report_metadata: dict
+    toc_page: Optional[int]
+    toc_entries: list
+    source_url: str
+
+
+# ---------------------------------------------------------------------------
 # Placeholder table-specific extractors
 # ---------------------------------------------------------------------------
 #
-# These classes accept a PDF URL (not a local path). Internally they:
-#   1. Download the PDF once via PDFManager.download_pdf()
-#   2. Extract report metadata from the URL via
-#      PDFManager.extract_report_date_from_url()
-#   3. Run the generic pipeline (PipelineEngine.run()) on the resulting
-#      local PDF path
+# Extractors now accept a `knbs` reference (the owning KNBSExtractor
+# instance) instead of a raw PDFManager. They pull everything document-level
+# (pdf_path, metadata, TOC) from `knbs.get_context(pdf_url)`, which is
+# computed once and cached for the lifetime of that KNBSExtractor instance.
 #
-# They do NOT yet parse the resulting dataframe into structured records.
-# That logic will be added table-by-table in the future without touching
-# the reusable pipeline above.
+# No extractor calls pdf_manager.download_pdf(), pdf_manager
+# .extract_report_date_from_url(), pipeline.find_toc(), or
+# pipeline.parse_toc() directly anymore -- only KNBSExtractor's cached
+# getters do that.
 #
-# (FuelExtractor is the exception -- see its class docstring below.)
+# (FuelExtractor is the exception in terms of *table-selection* strategy --
+# see its class docstring below -- but it too now reads TOC/page-count
+# information from the shared cache instead of recomputing it.)
 # ---------------------------------------------------------------------------
 
 class BaseExtractor(ABC):
     """
     Shared base for all table-specific extractors.
 
-    Holds references to the shared PDFManager, PipelineEngine, and
-    Validator instances so individual extractors stay thin and only
-    own their own TABLE_CONFIG lookup + (future) parsing logic.
+    Holds a reference to the owning KNBSExtractor (`knbs`) for cached,
+    document-level context, plus the shared PipelineEngine and Validator
+    instances for table-specific work.
     """
 
-    def __init__(self, pdf_manager, pipeline, validator):
-        self.pdf_manager = pdf_manager
+    def __init__(self, knbs, pipeline, validator):
+        self.knbs = knbs
         self.pipeline = pipeline
         self.validator = validator
 
@@ -1032,34 +1079,28 @@ class CBRExtractor(BaseExtractor):
                 build_extractor_response()), with "data" containing the
                 structured CBR records.
         """
-        local_pdf_path = self.pdf_manager.download_pdf(pdf_url)
-        report_metadata = self.pdf_manager.extract_report_date_from_url(pdf_url)
+        context = self.knbs.get_context(pdf_url)
 
         config = TABLE_CONFIG["cbr"]
         table_df = self.pipeline.run(
-            pdf_path=local_pdf_path,
+            pdf_path=context.pdf_path,
+            toc_entries=context.toc_entries,
             target=config.target,
             keywords=config.keywords,
         )
 
-        metadata = {
-            "source_url": pdf_url,
-            "report_date": report_metadata["report_date"] if report_metadata else None,
-            "month": report_metadata["month"] if report_metadata else None,
-            "year": report_metadata["year"] if report_metadata else None,
-        }
-        logger.info("extract_cbr metadata: %s", metadata)
+        logger.info("extract_cbr metadata: %s", context.report_metadata)
 
         if table_df is None or table_df.empty:
             logger.error("extract_cbr: no candidate table found; returning empty list")
-            return build_extractor_response("Interest Rate", metadata, pdf_url, [])
+            return build_extractor_response("Interest Rate", context.report_metadata, pdf_url, [])
 
-        results = parse_cbr_table(table_df, metadata)
+        results = parse_cbr_table(table_df, context.report_metadata)
 
         if not self.validator.validate_output(results):
             logger.warning("extract_cbr: output failed validation")
 
-        return build_extractor_response("Interest Rate", metadata, pdf_url, results)
+        return build_extractor_response("Interest Rate", context.report_metadata, pdf_url, results)
 
 
 # ---------------------------------------------------------------------------
@@ -1196,35 +1237,29 @@ class InflationExtractor(BaseExtractor):
                 build_extractor_response()), with "data" containing the
                 structured inflation records.
         """
-        local_pdf_path = self.pdf_manager.download_pdf(pdf_url)
-        report_metadata = self.pdf_manager.extract_report_date_from_url(pdf_url)
+        context = self.knbs.get_context(pdf_url)
 
         config = TABLE_CONFIG["inflation"]
         table_df = self.pipeline.run(
-            pdf_path=local_pdf_path,
+            pdf_path=context.pdf_path,
+            toc_entries=context.toc_entries,
             target=config.target,
             keywords=config.keywords,
         )
 
-        metadata = {
-            "source_url": pdf_url,
-            "report_date": report_metadata["report_date"] if report_metadata else None,
-            "month": report_metadata["month"] if report_metadata else None,
-            "year": report_metadata["year"] if report_metadata else None,
-        }
-        logger.info("extract_inflation metadata: %s", metadata)
+        logger.info("extract_inflation metadata: %s", context.report_metadata)
 
         if table_df is None or table_df.empty:
             logger.error(
                 "extract_inflation: no candidate table found"
             )
             return build_extractor_response(
-                "Consumer Price Indices and Inflation Rates", metadata, pdf_url, []
+                "Consumer Price Indices and Inflation Rates", context.report_metadata, pdf_url, []
             )
 
         results = parse_inflation_table(
             table_df,
-            metadata,
+            context.report_metadata,
         )
 
         if not self.validator.validate_output(results):
@@ -1233,7 +1268,7 @@ class InflationExtractor(BaseExtractor):
             )
 
         return build_extractor_response(
-            "Consumer Price Indices and Inflation Rates", metadata, pdf_url, results
+            "Consumer Price Indices and Inflation Rates", context.report_metadata, pdf_url, results
         )
 
 
@@ -1716,18 +1751,15 @@ class ExchangeExtractor(BaseExtractor):
                 build_extractor_response()), with "data" containing the
                 structured exchange-rate records.
         """
-        local_pdf = self.pdf_manager.download_pdf(pdf_url)
-
-        report_metadata = self.pdf_manager.extract_report_date_from_url(
-            pdf_url
-        )
+        context = self.knbs.get_context(pdf_url)
 
         config = TABLE_CONFIG["exchange_rates"]
 
         dataframe = self.pipeline.run(
-            local_pdf,
-            config.target,
-            config.keywords,
+            pdf_path=context.pdf_path,
+            toc_entries=context.toc_entries,
+            target=config.target,
+            keywords=config.keywords,
         )
 
         if dataframe is None:
@@ -1735,7 +1767,7 @@ class ExchangeExtractor(BaseExtractor):
                 "Exchange extraction failed"
             )
             return build_extractor_response(
-                "Exchange Rates", report_metadata, pdf_url, []
+                "Exchange Rates", context.report_metadata, pdf_url, []
             )
 
         logger.info(
@@ -1756,11 +1788,11 @@ class ExchangeExtractor(BaseExtractor):
             parsed_data
         ):
             return build_extractor_response(
-                "Exchange Rates", report_metadata, pdf_url, [], status="failed"
+                "Exchange Rates", context.report_metadata, pdf_url, [], status="failed"
             )
 
         return build_extractor_response(
-            "Exchange Rates", report_metadata, pdf_url, parsed_data
+            "Exchange Rates", context.report_metadata, pdf_url, parsed_data
         )
 
 
@@ -1771,8 +1803,7 @@ class FuelExtractor(BaseExtractor):
 
     Unlike the other extractors, this one does NOT call
     PipelineEngine.run() end-to-end. It reuses PipelineEngine's individual
-    reusable steps (find_toc, parse_toc, find_table,
-    extract_candidate_tables) directly, but:
+    reusable steps (find_table, extract_candidate_tables) directly, but:
 
       * Looks the target table up by its title only (never by a table
         number like "15(e)"), via PipelineEngine.find_table(), so the
@@ -1790,7 +1821,10 @@ class FuelExtractor(BaseExtractor):
         Basket Prices" are rejected even if a keyword or two overlaps.
 
     PipelineEngine itself is not modified by any of this, and no other
-    extractor is affected.
+    extractor is affected. TOC page / TOC entries / total page count are
+    now sourced from the shared KNBSExtractor cache (via KNBSContext and
+    knbs.get_page_count()) instead of being recomputed and instead of this
+    extractor opening/closing its own pdfplumber.PDF handle.
     """
 
     # Pages to search before the computed real PDF page.
@@ -1820,8 +1854,8 @@ class FuelExtractor(BaseExtractor):
         can land a couple of pages after the TOC-referenced page.
 
         Args:
-            toc_page (int): Zero-based PDF page index of the TOC, from
-                PipelineEngine.find_toc().
+            toc_page (int): Zero-based PDF page index of the TOC (from the
+                shared KNBSContext).
             document_page (int): Printed page number from the matched TOC
                 entry, from PipelineEngine.find_table().
             total_pages (int): Total number of pages in the PDF, used to
@@ -1862,57 +1896,38 @@ class FuelExtractor(BaseExtractor):
 
     def extract(self, pdf_url):
 
-        local_pdf_path = self.pdf_manager.download_pdf(pdf_url)
-        report_metadata = self.pdf_manager.extract_report_date_from_url(pdf_url)
-
-        metadata = {
-            "source_url": pdf_url,
-            "report_date": report_metadata["report_date"] if report_metadata else None,
-            "month": report_metadata["month"] if report_metadata else None,
-            "year": report_metadata["year"] if report_metadata else None,
-        }
+        context = self.knbs.get_context(pdf_url)
 
         config = TABLE_CONFIG["fuels"]
 
-        pdf = self.pdf_manager.load_pdf(local_pdf_path)
+        matched_entry = self.pipeline.find_table(
+            context.toc_entries,
+            config.target
+        )
 
-        try:
-            toc_page = self.pipeline.find_toc(pdf)
-            entries = self.pipeline.parse_toc(pdf, toc_page)
-
-            matched_entry = self.pipeline.find_table(
-                entries,
-                config.target
+        if matched_entry is None:
+            logger.error(
+                "extract_fuels: no matching TOC entry"
+            )
+            return build_extractor_response(
+                "National Average Retail Prices for Selected Fuels",
+                context.report_metadata,
+                pdf_url,
+                [],
             )
 
-            if matched_entry is None:
-                logger.error(
-                    "extract_fuels: no matching TOC entry"
-                )
-                return build_extractor_response(
-                    "National Average Retail Prices for Selected Fuels",
-                    metadata,
-                    pdf_url,
-                    [],
-                )
+        total_pages = self.knbs.get_page_count(pdf_url)
 
-            total_pages = len(pdf.pages)
+        candidate_pages = self._compute_candidate_pages(
+            context.toc_page,
+            matched_entry["document_page"],
+            total_pages
+        )
 
-            candidate_pages = self._compute_candidate_pages(
-                toc_page,
-                matched_entry["document_page"],
-                total_pages
-            )
-
-            candidate_tables = (
-                self.pipeline.extract_candidate_tables(
-                    local_pdf_path,
-                    candidate_pages
-                )
-            )
-
-        finally:
-            pdf.close()
+        candidate_tables = self.pipeline.extract_candidate_tables(
+            context.pdf_path,
+            candidate_pages
+        )
 
         table_df = select_fuel_table(candidate_tables)
 
@@ -1922,14 +1937,14 @@ class FuelExtractor(BaseExtractor):
             )
             return build_extractor_response(
                 "National Average Retail Prices for Selected Fuels",
-                metadata,
+                context.report_metadata,
                 pdf_url,
                 [],
             )
 
         results = parse_fuel_table(
             table_df,
-            metadata,
+            context.report_metadata,
         )
 
         if not self.validator.validate_output(results):
@@ -1939,7 +1954,7 @@ class FuelExtractor(BaseExtractor):
 
         return build_extractor_response(
             "National Average Retail Prices for Selected Fuels",
-            metadata,
+            context.report_metadata,
             pdf_url,
             results,
         )
@@ -1961,43 +1976,50 @@ class StockMarketExtractor(BaseExtractor):
                 empty since parsing is not yet implemented, so "status"
                 will be "failed".
         """
-        local_pdf_path = self.pdf_manager.download_pdf(pdf_url)
-        report_metadata = self.pdf_manager.extract_report_date_from_url(pdf_url)
+        context = self.knbs.get_context(pdf_url)
 
         config = TABLE_CONFIG["stock_market"]
         table_df = self.pipeline.run(
-            pdf_path=local_pdf_path,
+            pdf_path=context.pdf_path,
+            toc_entries=context.toc_entries,
             target=config.target,
             keywords=config.keywords,
         )
 
-        metadata = {
-            "source_url": pdf_url,
-            "report_date": report_metadata["report_date"] if report_metadata else None,
-            "month": report_metadata["month"] if report_metadata else None,
-            "year": report_metadata["year"] if report_metadata else None,
-        }
-        logger.info("extract_stock_market metadata: %s", metadata)
+        logger.info("extract_stock_market metadata: %s", context.report_metadata)
 
         # TODO:
         # Add stock market parsing logic
         # - Parse table_df into structured records
-        # - Attach `metadata` to each returned record
+        # - Attach `context.report_metadata` to each returned record
 
-        return build_extractor_response("Stock Market", metadata, pdf_url, [])
+        return build_extractor_response("Stock Market", context.report_metadata, pdf_url, [])
 
 
 # ---------------------------------------------------------------------------
-# CLASS: KNBSExtractor (top-level orchestrator)
+# CLASS: KNBSExtractor (top-level orchestrator + cache owner)
 # ---------------------------------------------------------------------------
 
 class KNBSExtractor:
     """
     Top-level orchestrator. Owns the shared PDFManager, PipelineEngine,
-    and Validator, and exposes one convenience method per target table.
+    Validator, AND the per-report cache (PDF path, report metadata, opened
+    pdfplumber object, TOC page, TOC entries).
 
     Each get_* method wires up the relevant extractor with the shared
-    collaborators and delegates to it -- no extraction logic lives here.
+    collaborators and delegates to it -- no table-parsing logic lives here.
+
+    Caching contract:
+      * The cache is keyed on `source_url`. Calling any get_*() method with
+        a *different* pdf_url than the one currently cached transparently
+        resets the cache (closes the old pdfplumber handle) and starts
+        fresh -- so it is always safe to reuse one KNBSExtractor instance
+        across multiple reports, it just won't get the caching benefit
+        across different URLs.
+      * Within the same pdf_url, download / metadata parse / TOC parse
+        each happen exactly once, no matter how many get_cbr() /
+        get_inflation() / get_exchange_rates() / get_fuels() /
+        get_stock_market() calls follow.
     """
 
     def __init__(self):
@@ -2005,24 +2027,175 @@ class KNBSExtractor:
         self.pipeline = PipelineEngine(self.pdf_manager)
         self.validator = Validator()
 
+        # --- Cached, per-report state ----------------------------------
+        self.source_url: Optional[str] = None
+        self.pdf_path: Optional[str] = None
+        self.report_metadata: Optional[dict] = None
+        self.pdf: Optional["pdfplumber.PDF"] = None
+        self.toc_page: Optional[int] = None
+        self.toc_entries: Optional[list] = None
+
+    # ------------------------------------------------------------------
+    # Cache management
+    # ------------------------------------------------------------------
+
+    def _reset_cache_if_new_url(self, pdf_url: str) -> None:
+        """
+        Invalidate the cache if `pdf_url` differs from the currently
+        cached `source_url`. Safe to call at the top of every getter.
+        """
+        if self.source_url == pdf_url:
+            return
+
+        if self.source_url is not None:
+            logger.info(
+                "KNBSExtractor: new source URL detected (old=%s new=%s); "
+                "resetting cache",
+                self.source_url, pdf_url,
+            )
+
+        self.close()
+
+        self.source_url = pdf_url
+        self.pdf_path = None
+        self.report_metadata = None
+        self.pdf = None
+        self.toc_page = None
+        self.toc_entries = None
+
+    def close(self) -> None:
+        """Close the cached pdfplumber handle, if one is open."""
+        if self.pdf is not None:
+            try:
+                self.pdf.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("KNBSExtractor: error closing cached PDF: %s", exc)
+            finally:
+                self.pdf = None
+
+    def __del__(self):
+        # Best-effort cleanup; never raise from __del__.
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------------------
+    # Lazy, cached getters
+    # ------------------------------------------------------------------
+
+    def get_pdf(self, pdf_url: str) -> str:
+        """
+        Return the local filesystem path to `pdf_url`, downloading it only
+        the first time it's requested for this instance.
+        """
+        self._reset_cache_if_new_url(pdf_url)
+
+        if self.pdf_path is not None:
+            return self.pdf_path
+
+        self.pdf_path = self.pdf_manager.download_pdf(pdf_url)
+        return self.pdf_path
+
+    def get_report_metadata(self, pdf_url: str) -> dict:
+        """
+        Return {"source_url", "report_date", "month", "year"} for
+        `pdf_url`, computed only once per instance/URL.
+        """
+        self._reset_cache_if_new_url(pdf_url)
+
+        if self.report_metadata is not None:
+            return self.report_metadata
+
+        raw = self.pdf_manager.extract_report_date_from_url(pdf_url)
+        self.report_metadata = {
+            "source_url": pdf_url,
+            "report_date": raw["report_date"] if raw else None,
+            "month": raw["month"] if raw else None,
+            "year": raw["year"] if raw else None,
+        }
+        return self.report_metadata
+
+    def get_pdf_object(self, pdf_url: str) -> "pdfplumber.PDF":
+        """
+        Return the opened pdfplumber.PDF for `pdf_url`, opening it only
+        the first time it's requested for this instance. Caller does NOT
+        need to close it -- KNBSExtractor.close() (or a new URL) does.
+        """
+        self._reset_cache_if_new_url(pdf_url)
+
+        if self.pdf is not None:
+            return self.pdf
+
+        pdf_path = self.get_pdf(pdf_url)
+        self.pdf = self.pdf_manager.load_pdf(pdf_path)
+        return self.pdf
+
+    def get_toc_page(self, pdf_url: str) -> Optional[int]:
+        """Return the cached TOC page index for `pdf_url`."""
+        self._reset_cache_if_new_url(pdf_url)
+
+        if self.toc_page is not None:
+            return self.toc_page
+
+        pdf = self.get_pdf_object(pdf_url)
+        self.toc_page = self.pipeline.find_toc(pdf)
+        return self.toc_page
+
+    def get_toc(self, pdf_url: str) -> list:
+        """Return the cached, parsed TOC entries for `pdf_url`."""
+        self._reset_cache_if_new_url(pdf_url)
+
+        if self.toc_entries is not None:
+            return self.toc_entries
+
+        pdf = self.get_pdf_object(pdf_url)
+        toc_page = self.get_toc_page(pdf_url)
+        self.toc_entries = self.pipeline.parse_toc(pdf, toc_page)
+        return self.toc_entries
+
+    def get_page_count(self, pdf_url: str) -> int:
+        """Return the total page count of the (cached) opened PDF."""
+        return len(self.get_pdf_object(pdf_url).pages)
+
+    def get_context(self, pdf_url: str) -> KNBSContext:
+        """
+        Build (from cache) the full KNBSContext handed to every
+        table-specific extractor. Cheap to call repeatedly -- every field
+        is resolved through the cached getters above.
+        """
+        return KNBSContext(
+            pdf_path=self.get_pdf(pdf_url),
+            pdf=self.get_pdf_object(pdf_url),
+            report_metadata=self.get_report_metadata(pdf_url),
+            toc_page=self.get_toc_page(pdf_url),
+            toc_entries=self.get_toc(pdf_url),
+            source_url=pdf_url,
+        )
+
+    # ------------------------------------------------------------------
+    # Public extraction API (unchanged signatures -- MacroService is
+    # unaffected by this refactor)
+    # ------------------------------------------------------------------
+
     def get_cbr(self, pdf_url):
-        extractor = CBRExtractor(self.pdf_manager, self.pipeline, self.validator)
+        extractor = CBRExtractor(self, self.pipeline, self.validator)
         return extractor.extract(pdf_url)
 
     def get_inflation(self, pdf_url):
-        extractor = InflationExtractor(self.pdf_manager, self.pipeline, self.validator)
+        extractor = InflationExtractor(self, self.pipeline, self.validator)
         return extractor.extract(pdf_url)
 
     def get_exchange_rates(self, pdf_url):
-        extractor = ExchangeExtractor(self.pdf_manager, self.pipeline, self.validator)
+        extractor = ExchangeExtractor(self, self.pipeline, self.validator)
         return extractor.extract(pdf_url)
 
     def get_fuels(self, pdf_url):
-        extractor = FuelExtractor(self.pdf_manager, self.pipeline, self.validator)
+        extractor = FuelExtractor(self, self.pipeline, self.validator)
         return extractor.extract(pdf_url)
 
     def get_stock_market(self, pdf_url):
-        extractor = StockMarketExtractor(self.pdf_manager, self.pipeline, self.validator)
+        extractor = StockMarketExtractor(self, self.pipeline, self.validator)
         return extractor.extract(pdf_url)
 
 
@@ -2038,6 +2211,14 @@ if __name__ == "__main__":
     #     "Leading-Economic-Indicators-March-2026.pdf"
     # )
     # knbs = KNBSExtractor()
-    # results = knbs.get_cbr(sample_url)
-    # print(results)
+    #
+    # # PDF is downloaded once here...
+    # cbr_results = knbs.get_cbr(sample_url)
+    #
+    # # ...and reused (no re-download, no re-TOC-parse) for every call below.
+    # inflation_results = knbs.get_inflation(sample_url)
+    # exchange_results = knbs.get_exchange_rates(sample_url)
+    # fuel_results = knbs.get_fuels(sample_url)
+    #
+    # knbs.close()
     pass

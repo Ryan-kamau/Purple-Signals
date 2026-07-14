@@ -156,8 +156,8 @@ class RSSNewsIngestor:
 
         service = RSSNewsIngestor(db)
         result  = service.ingest_feed(
-            "https://www.businessdailyafrica.com/rss/266",
-            source_label="Business Daily Africa",
+        "url": "https://www.standardmedia.co.ke/rss/business.php",
+        "source_label": "The Standard Business"
         )
         print(result.saved, "new articles stored")
     """
@@ -1228,8 +1228,8 @@ if __name__ == "__main__":
         "\n"
         "    db = SessionLocal()\n"
         "    result = RSSNewsIngestor(db).ingest_feed(\n"
-        '        "https://www.businessdailyafrica.com/rss/266",\n'
-        '        source_label="Business Daily Africa"\n'
+         "https://www.standardmedia.co.ke/rss/business.php",
+        # source_label="The Standard Business",
         "    )\n"
         "    print(result)\n"
         "\n"

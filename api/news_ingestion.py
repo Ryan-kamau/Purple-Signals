@@ -91,8 +91,8 @@ class FeedIngestRequest(BaseModel):
 
     url: HttpUrl = Field(
         ...,
-        description="Full RSS/Atom feed URL.",
-        examples=["https://www.businessdailyafrica.com/rss/266"],
+        description="The Standard Business",
+        examples=["https://www.standardmedia.co.ke/rss/business.php"],
     )
     label: str | None = Field(
         default=None,
@@ -100,7 +100,7 @@ class FeedIngestRequest(BaseModel):
             "Human-readable source name stored on each ingested headline. "
             "Falls back to the feed's own title or URL when omitted."
         ),
-        examples=["Business Daily Africa"],
+        examples=["The Standard Business"],
     )
 
 

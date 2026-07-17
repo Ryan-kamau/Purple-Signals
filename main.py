@@ -16,7 +16,7 @@ import logging
 
 from fastapi import FastAPI
 
-from api import market, news, news_ingestion, fundamentals
+from api import market, news, news_ingestion, fundamentals, macro_ingestor
 from database.session import init_db
 
 # ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ app.include_router(market.router)
 app.include_router(news.router)
 app.include_router(news_ingestion.router)
 app.include_router(fundamentals.router)
-
+app.include_router(macro_ingestor.router)
 
 # ---------------------------------------------------------------------------
 # Health check — useful for Docker / k8s probes and quick smoke tests.

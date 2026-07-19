@@ -1,6 +1,6 @@
 # schemas/macro.py
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Dict, Any
 from datetime import datetime
 
 
@@ -28,3 +28,20 @@ class MacroDataResponse(MacroDataBase):
 
     class Config:
         from_attributes = True
+
+class IngestionResponse(BaseModel):
+    """
+    Response returned by MacroData ingestion operations.
+    """
+
+    success: bool
+
+    report_date: datetime
+
+    saved: int
+
+    results: Dict[str, Dict[str, Any]]
+
+    errors: list[str]
+
+    fallback_used: bool

@@ -1,34 +1,8 @@
 # schemas/macro.py
 
-from pydantic import BaseModel, Dict, Any
+from pydantic import BaseModel
 from datetime import datetime
-
-
-class MacroDataBase(BaseModel):
-    inflation: float
-    report_date: datetime
-    fuel_price: float
-    cbk_rate: float
-    usd_kes_rate: float
-    euro_kes_rate: float
-    pounds_kes_rate: float
-    month: str
-    year: str
-    fuel_trend: float
-    inflation_trend: float
-
-
-class MacroDataCreate(MacroDataBase):
-    pass
-
-
-class MacroDataResponse(MacroDataBase):
-    id: int
-    timestamp: datetime
-
-    class Config:
-        from_attributes = True
-
+from typing import Dict, Any
 class IngestionResponse(BaseModel):
     """
     Response returned by MacroData ingestion operations.
@@ -45,3 +19,38 @@ class IngestionResponse(BaseModel):
     errors: list[str]
 
     fallback_used: bool
+
+"""
+Response schema for the read-only /macroeconomics router.
+
+MacroQueryService already returns fully-formed, structured dictionaries
+(status, message, counts, data, etc.). This schema exists purely for
+OpenAPI documentation and light typing — it intentionally allows extra
+fields (`extra="allow"`) so the router can return the service's dict
+as-is without FastAPI silently dropping any keys the service includes
+that aren't explicitly modeled here.
+"""
+
+from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict
+
+
+class MacroQueryResponse(BaseModel):
+    """
+    Generic envelope mirroring MacroQueryService's response shape.
+
+    Fields are all optional since not every service method populates
+    every key (e.g. snapshot/lookup responses may omit pagination
+    fields such as count/total/limit/offset).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: Optional[str] = None
+    message: Optional[str] = None
+    count: Optional[int] = None
+    total: Optional[int] = None
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+    data: Optional[Any] = None

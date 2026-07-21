@@ -1,6 +1,6 @@
 # models/macro.py
 
-from sqlalchemy import Column, Integer, Float, String, DateTime
+from sqlalchemy import Column, Integer, Float, String, Date
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,7 +12,7 @@ class MacroData(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    report_date = Column(DateTime(timezone=True), default=
+    report_date = Column(Date, default=
                          datetime.now(ZoneInfo("Africa/Nairobi")))
 
     inflation = Column(Float)
@@ -35,5 +35,5 @@ class MacroData(Base):
 
     inflation_trend = Column(Float)
 
-    timestamp = Column(DateTime(timezone=True), 
+    timestamp = Column(Date, 
                        default=datetime.now(ZoneInfo("Africa/Nairobi")))

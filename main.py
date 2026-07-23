@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 from api import (macroeconomics, market, news, 
                  news_ingestion, fundamentals, macro_ingestor,
-                macroeconomics)
+                macroeconomics, sentiment)
 from database.session import init_db
 
 # ---------------------------------------------------------------------------
@@ -65,6 +65,7 @@ app.include_router(news_ingestion.router)
 app.include_router(fundamentals.router)
 app.include_router(macro_ingestor.router)
 app.include_router(macroeconomics.router)
+app.include_router(sentiment.router)
 
 # ---------------------------------------------------------------------------
 # Health check — useful for Docker / k8s probes and quick smoke tests.

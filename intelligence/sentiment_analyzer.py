@@ -332,9 +332,8 @@ class SentimentAnalyzer:
 
         while True:
             batch = self._fetch_batch(
-                batch_size, only_unsentimental=False, after_id=last_id
+                batch_size, only_unsentimental=True, after_id=last_id
             )
-            logger.info("Fetched %d rows", len(batch))
             if not batch:
                 break
 
@@ -840,7 +839,7 @@ if __name__ == "__main__":
         if preview_score is not None:
             print(f"Preview label: {service._classify_score(preview_score)}")
 
-        stats = service._update_record(Headline())
+        stats = service.update_all_headlines(300)
         print("\nRun statistics:")
         print(stats)
     finally:

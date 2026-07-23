@@ -839,7 +839,7 @@ if __name__ == "__main__":
         if preview_score is not None:
             print(f"Preview label: {service._classify_score(preview_score)}")
 
-        stats = service.update_all_headlines(300)
+        stats = service.get_statistics()
         print("\nRun statistics:")
         print(stats)
     finally:

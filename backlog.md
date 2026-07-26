@@ -1,0 +1,3 @@
+"""
+change architecture in rss_news.py.....
+In a stricter layered architecture this would probably be split into an RSSFetcher (infra), a NewsNormalizer (domain), and a HeadlineRepository (persistence)

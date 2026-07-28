@@ -12,7 +12,7 @@ Pipeline position:
         │
         ├── text assembly (headline + description + content)
         ├── text validation / cleaning
-        ├── VADER polarity scoring
+        ├── FinBERT sentiment classification
         ├── custom weighted scoring
         │
         ▼
@@ -22,7 +22,8 @@ Responsibilities:
   - Read headlines from MySQL via an injected SQLAlchemy Session
   - Assemble analyzable text from headline / description / content
   - Validate and clean text (strip HTML, decode entities, normalise unicode)
-  - Score text using VADER, converted into a custom weighted score
+  - Score text using FinBERT (ProsusAI/finbert), converted into a signed
+    float score
   - Persist sentiment_score in batches (commit per batch, not per row)
   - Isolate per-record failures so one bad row never aborts a batch
   - Return structured, JSON-serialisable execution statistics
@@ -42,11 +43,10 @@ Reusability:
 feature engineering, ad-hoc scripts) can reuse the scoring logic directly.
 
 Future-proofing:
-    The VADER-specific logic is isolated behind `_run_vader()` and
-    `_compute_weighted_score()`. Swapping VADER for FinBERT / a HuggingFace
-    transformer / an LLM later only requires replacing those two methods —
-    every batching, persistence, validation, and statistics helper is
-    engine-agnostic.
+    The FinBERT-specific logic is isolated behind `_run_finbert()`. Swapping
+    FinBERT for a different transformer / an LLM later only requires
+    replacing that one method — every batching, persistence, validation,
+    and statistics helper is engine-agnostic.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from transformers import pipeline
 
 from models.headline_data import Headline
 
@@ -78,16 +78,9 @@ DEFAULT_BATCH_SIZE: int = 250
 # meaningful natural language rather than a stub / placeholder / link.
 MIN_TEXT_LENGTH: int = 3
 
-# Custom weighted-score blend.
-# weighted_score = (compound * COMPOUND_WEIGHT) + ((pos - neg) * POLARITY_WEIGHT)
-# The two weights sum to 1.0 so the output stays within VADER's [-1, 1] range.
-# Compound carries most of the signal (VADER's own normalised polarity);
-# (pos - neg) is added as a secondary signal so headlines with strong but
-# offsetting positive/negative language don't get flattened purely by
-# compound's internal normalisation. Swap these two weights (or the whole
-# formula) here — nothing else in the class needs to change.
-COMPOUND_WEIGHT: float = 0.7
-POLARITY_WEIGHT: float = 0.3
+# HuggingFace model identifier for the sentiment engine. Isolated as a
+# constant so swapping the model later is a one-line change.
+FINBERT_MODEL_NAME: str = "ProsusAI/finbert"
 
 # Score interpretation bands (documented in the class docstring / PRD).
 STRONG_POSITIVE_MIN: float = 0.50
@@ -158,9 +151,16 @@ class SentimentAnalyzer:
         """
         self.db = db
 
-        # VADER is expensive-ish to instantiate (loads its lexicon) — build
-        # exactly once per analyzer instance, never inside a loop.
-        self._vader = SentimentIntensityAnalyzer()
+        # FinBERT is expensive to instantiate (loads model weights + tokenizer
+        # from HuggingFace) — build exactly once per analyzer instance, never
+        # inside a loop. The pipeline returns the single highest-confidence
+        # label per call by default (top_k=None would return all three; we
+        # only need the winner, matching the previous VADER single-score
+        # behaviour).
+        self._finbert = pipeline(
+            "text-classification",
+            model=FINBERT_MODEL_NAME,
+        )
 
         self._stats: dict[str, Any] = {}
         self._reset_statistics()
@@ -172,7 +172,7 @@ class SentimentAnalyzer:
     def analyze_headline(self, text: str) -> Optional[float]:
         """
         Score an arbitrary piece of text end-to-end: validate -> clean ->
-        VADER -> custom weighted score.
+        FinBERT -> signed float score.
 
         This method touches the database in no way whatsoever, so any
         other module can import SentimentAnalyzer and call this directly
@@ -182,7 +182,7 @@ class SentimentAnalyzer:
             text: Raw text to analyze. May be messy (HTML, entities, etc).
 
         Returns:
-            Weighted sentiment score in [-1.0, 1.0], or None if the text
+            Sentiment score in [-1.0, 1.0], or None if the text
             is not meaningful natural language (empty, a bare link, an
             RSS placeholder, HTML-only, etc).
         """
@@ -209,7 +209,7 @@ class SentimentAnalyzer:
                     to `self.db` — this method never queries or writes).
 
         Returns:
-            Weighted sentiment score in [-1.0, 1.0], or None if no
+            Sentiment score in [-1.0, 1.0], or None if no
             meaningful text could be assembled from the record.
         """
         combined_text = self._build_analysis_text(
@@ -332,7 +332,7 @@ class SentimentAnalyzer:
 
         while True:
             batch = self._fetch_batch(
-                batch_size, only_unsentimental=True, after_id=last_id
+                batch_size, only_unsentimental=False, after_id=last_id
             )
             if not batch:
                 break
@@ -393,7 +393,7 @@ class SentimentAnalyzer:
 
         Returns:
             A single cleaned, whitespace-normalised string ready for
-            VADER, or None if no usable text exists.
+            FinBERT, or None if no usable text exists.
         """
         if not self._is_valid_text(headline):
             return None
@@ -417,7 +417,7 @@ class SentimentAnalyzer:
     def _is_valid_text(self, text: Optional[str]) -> bool:
         """
         Determine whether `text` is meaningful natural language worth
-        sending to VADER.
+        sending to FinBERT.
 
         Rejects: None, empty/whitespace-only strings, bare HTML anchors,
         Google redirect links with no surrounding words, known RSS
@@ -483,7 +483,7 @@ class SentimentAnalyzer:
             text: Raw text.
 
         Returns:
-            Cleaned text, safe to hand to VADER.
+            Cleaned text, safe to hand to FinBERT.
         """
         cleaned = self._decode_html_entities(text)
         cleaned = self._remove_html(cleaned)
@@ -517,8 +517,8 @@ class SentimentAnalyzer:
 
     def _score_cleaned_text(self, cleaned_text: str) -> float:
         """
-        Run VADER on already-cleaned, already-validated text and convert
-        the result into the custom weighted score.
+        Run FinBERT on already-cleaned, already-validated text and convert
+        the result into a signed float score.
 
         Kept separate from `analyze_headline()` so batch code paths that
         have already cleaned/validated text (via `_build_analysis_text`)
@@ -529,69 +529,86 @@ class SentimentAnalyzer:
                           and `_clean_text()`.
 
         Returns:
-            Weighted sentiment score in [-1.0, 1.0].
+            Sentiment score in [-1.0, 1.0].
         """
-        raw_scores = self._run_vader(cleaned_text)
-        return self._compute_weighted_score(raw_scores)
+        raw_result = self._run_finbert(cleaned_text)
+        return self._compute_weighted_score(raw_result)
 
-    def _run_vader(self, text: str) -> dict[str, float]:
+    def _run_finbert(self, text: str) -> dict[str, Any]:
         """
-        Isolated VADER call — the only method that talks to the sentiment
-        engine directly. Swapping VADER for FinBERT / a transformer model
+        Isolated FinBERT call — the only method that talks to the sentiment
+        engine directly. Swapping FinBERT for a different transformer model
         later means changing this method (and `_compute_weighted_score`)
         only; every other method in this class is engine-agnostic.
 
+        The HuggingFace `text-classification` pipeline returns the single
+        highest-confidence label by default, e.g.:
+            {"label": "positive", "score": 0.9134}
+
         Args:
-            text: Cleaned text.
+            text: Cleaned text. FinBERT's underlying tokenizer truncates
+                  input to its max sequence length (512 tokens) internally,
+                  so no manual truncation is required here.
 
         Returns:
-            VADER's raw polarity_scores dict: {"neg", "neu", "pos", "compound"}.
+            The pipeline's raw single-result dict: {"label", "score"}.
         """
-        return self._vader.polarity_scores(text)
+        # The pipeline returns a list with one dict per input string; we
+        # pass a single string, so we take the first (only) result.
+        result = self._finbert(text, truncation=True)
+        return result[0]
 
     @staticmethod
-    def _compute_weighted_score(scores: dict[str, float]) -> float:
+    def _compute_weighted_score(result: dict[str, Any]) -> float:
         """
-        Convert VADER's raw output into a single custom weighted score,
-        instead of persisting VADER's compound value as-is.
+        Convert FinBERT's raw classification output into a single signed
+        float score, instead of persisting the raw label/confidence pair.
 
-        Formula:
-            weighted = (compound * COMPOUND_WEIGHT) + ((pos - neg) * POLARITY_WEIGHT)
+        Mapping:
+            label == "positive"  ->  +confidence
+            label == "negative"  ->  -confidence
+            label == "neutral"   ->   0.0
 
         Rationale:
-            - `compound` is VADER's own normalised polarity in [-1, 1] and
-              carries the primary signal.
-            - `(pos - neg)` is added as a secondary signal so headlines
-              where positive and negative language coexist (common in
-              financial reporting — e.g. "profit rises despite debt
-              concerns") aren't purely governed by VADER's compound
-              normalisation.
-            - Weights sum to 1.0 so the result stays within [-1.0, 1.0].
+            FinBERT is a 3-class classifier (positive / neutral / negative)
+            with a single confidence score for its predicted class, unlike
+            VADER's multi-component polarity output. Signing the confidence
+            by the predicted label preserves the same [-1.0, 1.0] scale and
+            "more positive = higher, more negative = lower" semantics that
+            downstream code (band classification, alerts, dashboards)
+            already relies on.
 
         This is intentionally a small, swappable pure function — replace
-        the formula here to change the weighting algorithm platform-wide
+        the mapping here to change the scoring algorithm platform-wide
         without touching any batching/persistence code.
 
         Args:
-            scores: VADER's polarity_scores() output.
+            result: FinBERT's single-result dict: {"label", "score"}.
 
         Returns:
-            Weighted score rounded to 4 decimal places, clamped to
+            Signed score rounded to 4 decimal places, clamped to
             [-1.0, 1.0].
         """
-        compound = scores.get("compound", 0.0)
-        positive = scores.get("pos", 0.0)
-        negative = scores.get("neg", 0.0)
+        label = str(result.get("label", "")).lower()
+        confidence = float(result.get("score", 0.0))
 
-        weighted = (compound * COMPOUND_WEIGHT) + ((positive - negative) * POLARITY_WEIGHT)
-        weighted = max(-1.0, min(1.0, weighted))
+        if label == "positive":
+            signed_score = confidence
+        elif label == "negative":
+            signed_score = -confidence
+        else:
+            # "neutral" (or any unexpected label) carries no directional
+            # signal, matching the previous strict-neutral treatment.
+            signed_score = 0.0
 
-        return round(weighted, 4)
+        signed_score = max(-1.0, min(1.0, signed_score))
+
+        return round(signed_score, 4)
 
     @staticmethod
     def _classify_score(score: float) -> str:
         """
-        Convert a weighted score into a human-readable label.
+        Convert a signed sentiment score into a human-readable label.
 
         Bands (documented constants at module level):
             0.50  to  1.00   -> Strong Positive
@@ -604,7 +621,7 @@ class SentimentAnalyzer:
         reusable helper for downstream modules (alerts, dashboards).
 
         Args:
-            score: Weighted sentiment score.
+            score: Signed sentiment score.
 
         Returns:
             One of the LABEL_* constants.
@@ -839,7 +856,7 @@ if __name__ == "__main__":
         if preview_score is not None:
             print(f"Preview label: {service._classify_score(preview_score)}")
 
-        stats = service.get_statistics()
+        stats = service.update_all_headlines(300)
         print("\nRun statistics:")
         print(stats)
     finally:

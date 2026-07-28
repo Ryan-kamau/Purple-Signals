@@ -57,6 +57,8 @@ from sqlalchemy.orm import Session
 from intelligence.keywords_engine import KeywordEngine
 from models.headline_data import Headline
 from schemas.headline import IngestionResponse
+from sqlalchemy import select
+
 
 logger = logging.getLogger(__name__)
 
@@ -131,11 +133,6 @@ class RSSNewsIngestor:
     Fetches one RSS feed, enriches entries with KeywordEngine, deduplicates,
     and bulk-inserts new Headline rows in a single database transaction.
 
-    The enrichment pipeline mirrors NewsService._store_fetch_response() exactly:
-      - KeywordEngine.enrich_articles() runs on the normalised batch
-      - Articles below IMPACT_SCORE_THRESHOLD are discarded (default: 2)
-      - Intelligence fields (keywords_detected, categories, matched_keywords_count,
-        impact_score) are persisted on every stored Headline row
 
     This ensures that RSS-sourced headlines produce identical DB records to
     headlines ingested via the NewsAPI path — both are queryable via the same
@@ -296,7 +293,6 @@ class RSSNewsIngestor:
         )
 
         # ── Step 5: Filter by impact score ──────────────────────────────────
-        # Mirrors NewsService threshold logic exactly.
         filtered_articles: List[Dict[str, Any]] = []
         low_impact_count = 0
 
@@ -380,8 +376,7 @@ class RSSNewsIngestor:
         Ingest every feed in the default registry (or a custom list).
 
         A single KeywordEngine instance is shared across all feeds to avoid
-        re-building the keyword lookup table for each feed — same pattern
-        used in NewsService where one engine instance handles all batches.
+        re-building the keyword lookup table for each feed 
 
         Args:
             session:                Active SQLAlchemy session.
@@ -479,7 +474,8 @@ class RSSNewsIngestor:
         # partial data. Only fatal if entries are absent too.
         if parsed.get("bozo"):
             bozo_exc = parsed.get("bozo_exception")
-            if not parsed.get("entries"):
+            entries = parsed.get("entries", [])
+            if not entries:
                 error = f"feedparser could not parse {feed_url}: {bozo_exc}"
                 logger.error(
                     "RSS feed unparseable: url=%s bozo_exception=%s",
@@ -491,7 +487,7 @@ class RSSNewsIngestor:
                 "RSS feed bozo (partial parse): url=%s bozo_exception=%s entries=%d",
                 feed_url,
                 bozo_exc,
-                len(parsed.get("entries", [])),
+                len(entries),
             )
 
         status = parsed.get("status")
@@ -503,7 +499,7 @@ class RSSNewsIngestor:
         logger.info(
             "RSS fetch succeeded: url=%s entries=%d",
             feed_url,
-            len(parsed.get("entries", [])),
+            len(entries),
         )
         return parsed, None
 
@@ -677,10 +673,9 @@ class RSSNewsIngestor:
 
         Maps NewsAPI field names back to Headline column names and serialises
         KeywordEngine's list outputs (keywords_detected, categories) into
-        comma-joined strings — identical to how NewsService._normalize_article()
-        handles this conversion.
+        comma-joined strings.
 
-        Intelligence field mapping (mirrors NewsService._normalize_article()):
+        Intelligence field mapping for Headline ORM columns:
             enriched["keywords_detected"] list[str] → comma-joined str  → keywords_detected column
             enriched["categories"]        list[str] → comma-joined str  → categories column
             enriched["matched_keywords_count"] int  → int               → matched_keywords_count column
@@ -699,7 +694,7 @@ class RSSNewsIngestor:
         matched_keywords_count: int = enriched_article.get("matched_keywords_count") or 0
         impact_score: int = enriched_article.get("impact_score") or 0
 
-        # Serialise lists to comma-joined strings — identical to NewsService
+        # Serialise lists to comma-joined strings
         keywords_detected: Optional[str] = (
             ", ".join(raw_keywords) if raw_keywords else None
         )
@@ -961,14 +956,11 @@ class RSSNewsIngestor:
             chunk = unique_urls[chunk_start: chunk_start + _URL_CHUNK_SIZE]
             try:
                 rows = (
-                    self._session.query(Headline.url)
-                    .filter(Headline.url.in_(chunk))
+                    self._session.scalars(select(Headline.url)
+                    .where(Headline.url.in_(chunk)))
                     .all()
                 )
-                for row in rows:
-                    url = row[0] if isinstance(row, tuple) else getattr(row, "url", None)
-                    if url:
-                        existing.add(url)
+                existing.update(rows)
             except Exception as exc:
                 logger.error(
                     "URL dedup query failed for chunk starting at %d: %s",
@@ -996,8 +988,7 @@ class RSSNewsIngestor:
         Insert a batch of Headline-ready dicts in a single transaction.
 
         Uses session.flush() to assign database IDs before committing,
-        so we can return ``stored_ids`` in the response — same approach
-        as NewsService._save_articles().
+        so we can return ``stored_ids`` in the response
 
         On failure: rolls back cleanly and returns (0, [], error_message).
 

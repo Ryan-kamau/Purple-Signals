@@ -339,7 +339,7 @@ class PipelineEngine:
     # STEP 2: TOC detection
     # -----------------------------------------------------------------
 
-    def find_toc(self, pdf, max_pages_to_search=10):
+    def find_toc(self, pdf, max_pages_to_search=6):
         """
         Locate the "List of Tables" (Table of Contents) page within a PDF.
 

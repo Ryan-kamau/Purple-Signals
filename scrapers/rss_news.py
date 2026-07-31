@@ -472,9 +472,9 @@ class RSSNewsIngestor:
 
         # feedparser sets bozo=True for malformed feeds but still returns
         # partial data. Only fatal if entries are absent too.
+        entries = parsed.get("entries", [])
         if parsed.get("bozo"):
             bozo_exc = parsed.get("bozo_exception")
-            entries = parsed.get("entries", [])
             if not entries:
                 error = f"feedparser could not parse {feed_url}: {bozo_exc}"
                 logger.error(

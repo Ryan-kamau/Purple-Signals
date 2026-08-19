@@ -8,6 +8,7 @@ from models.alert_data import Alert
 from models.macro_data import MacroData
 from models.sentiments_data import SentimentScore
 from models.analytics_data import AnalysisResult
+from models.daily_market_features import DailyMarketFeatures
 
 
 def _init_db():

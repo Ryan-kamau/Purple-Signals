@@ -4,11 +4,11 @@ from typing import Optional
 from sqlalchemy import Date, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.database import Base
+from database.base  import Base
 
 
 class DailyMarketFeatures(Base):
-    __tablename__ = "daily_market_features"
+    __tablename__ = "daily_features"
 
     __table_args__ = (
         UniqueConstraint(

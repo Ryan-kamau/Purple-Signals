@@ -16,7 +16,6 @@ No FastAPI routes live here.
 """
  
 import logging
-import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -31,10 +30,6 @@ from scrapers.market_fetcher import MarketFetcher
 logger = logging.getLogger(__name__)
  
 NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
-
-# Rolling window size (in prior stored observations) used for volatility.
-# Kept as a constant so it's easy to tune later without touching the logic.
-VOLATILITY_WINDOW = 20
  
  
 # ---------------------------------------------------------------------------
@@ -71,6 +66,7 @@ class MarketService:
       - Swap the fetcher implementation without touching DB logic.
       - Add Redis caching as a thin wrapper around _fetch_raw().
       - Plug in Celery by calling public methods from task functions.
+      - Extend _compute_volatility() with proper rolling std-dev later.
  
     Usage:
         service = MarketService(db_session)
@@ -319,78 +315,23 @@ class MarketService:
             Absolute price movement rounded to 4 decimal places.
         """
         return round((price * Decimal(daily_change_pct)) / Decimal(100), 4)
-
-    def _get_recent_prices(self, ticker: str, limit: int = VOLATILITY_WINDOW) -> list[float]:
-        """
-        Fetch the most recent previously-stored prices for a ticker.
-
-        Only looks at rows already committed to the database — the current,
-        not-yet-saved incoming record is never included here.
-
-        Args:
-            ticker:  Normalised ticker symbol (e.g. "KCB").
-            limit:   Maximum number of previous observations to retrieve.
-
-        Returns:
-            Prices in chronological order (oldest → newest), ready to be
-            used together with the current price for a returns calculation.
-        """
-        rows = (
-            self._db.query(MarketData.price)
-            .filter(MarketData.ticker == ticker)
-            .order_by(MarketData.timestamp.desc())
-            .limit(limit)
-            .all()
-        )
-
-        # `rows` comes back newest-first (DESC); reverse so downstream
-        # return calculations can walk the series chronologically.
-        prices = [float(row[0]) for row in reversed(rows)]
-        return prices
-
+ 
     @staticmethod
-    def _compute_volatility(
-        historical_prices: list[float], current_price: float
-    ) -> float | None:
+    def _compute_volatility(daily_change_pct: float) -> float:
         """
-        Rolling sample standard deviation of price returns.
-
-        Uses the most recent `VOLATILITY_WINDOW` previously-stored prices
-        together with the current (not-yet-saved) price to build a
-        chronological price series, derives simple returns from it, and
-        returns the sample standard deviation of those returns.
-
-        If there isn't a full window of prior history available, volatility
-        cannot be meaningfully calculated and None is returned instead of
-        falling back to a shorter window, zero, or any proxy value.
-
+        MVP volatility proxy — absolute value of the daily % change.
+ 
+        Upgrade path (no interface change needed):
+          - Replace with rolling std-dev once enough history is stored.
+          - Accept a list of historical returns for proper σ calculation.
+ 
         Args:
-            historical_prices: Previous stored prices for this ticker, in
-                                chronological order (oldest → newest).
-            current_price:     The current, not-yet-saved price.
-
+            daily_change_pct: Today's percentage change (e.g. -2.26).
+ 
         Returns:
-            Non-negative float sample std-dev of returns, or None if there
-            isn't enough history for a full VOLATILITY_WINDOW window.
+            Non-negative float representing relative volatility.
         """
-        if len(historical_prices) < VOLATILITY_WINDOW:
-            return None
-
-        # Use only the most recent VOLATILITY_WINDOW previous observations,
-        # plus the current price, so the window never grows beyond that.
-        series = historical_prices[-VOLATILITY_WINDOW:] + [current_price]
-
-        returns = [
-            (series[i] / series[i - 1]) - 1
-            for i in range(1, len(series))
-            if series[i - 1] != 0
-        ]
-
-        if len(returns) < 2:
-            # statistics.stdev requires at least two data points.
-            return None
-
-        return round(statistics.stdev(returns), 4)
+        return round(abs(daily_change_pct), 4)
  
     # ------------------------------------------------------------------
     # ORM construction
@@ -424,18 +365,11 @@ class MarketService:
             return None
  
         daily_change = self._compute_daily_change(price, daily_change_pct)
-        ticker = raw["ticker"].upper().strip()
-
-        # Volatility depends on prior stored history for this exact ticker,
-        # so it must be fetched and computed before the ORM object exists —
-        # the current record is never part of its own historical query.
-        historical_prices = self._get_recent_prices(ticker, limit=VOLATILITY_WINDOW)
-        volatility = self._compute_volatility(historical_prices, float(price))
-
+        volatility = self._compute_volatility(daily_change_pct)
         timestamp = self._resolve_timestamp(raw)
  
         return MarketData(
-            ticker=ticker,
+            ticker=raw["ticker"].upper().strip(),
             company=raw["name"].strip(),
             price=price,
             volume=volume,
@@ -505,25 +439,13 @@ class MarketService:
             self._db.add(market_data)
             self._db.commit()
             self._db.refresh(market_data)
-
-            if market_data.volatility is None:
-                logger.debug(
-                    "Saved %s | price=%.2f | change=%.2f%% | volatility=None (insufficient history) | volume=%d",
-                    market_data.ticker,
-                    market_data.price,
-                    market_data.daily_change_pct,
-                    market_data.volume,
-                )
-            else:
-                logger.debug(
-                    "Saved %s | price=%.2f | change=%.2f%% | volatility=%.4f | volume=%d",
-                    market_data.ticker,
-                    market_data.price,
-                    market_data.daily_change_pct,
-                    market_data.volatility,
-                    market_data.volume,
-                )
- 
+            logger.debug(
+                "Saved %s | price=%.2f | change=%.2f%% | vol=%d",
+                market_data.ticker,
+                market_data.price,
+                market_data.daily_change_pct,
+                market_data.volume,
+            )
             return market_data
  
         except Exception as exc:  # noqa: BLE001
@@ -575,3 +497,4 @@ class MarketService:
                     skipped += 1
  
             return saved, skipped
+ 

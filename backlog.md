@@ -8,3 +8,4 @@ Expensive loops: _normalize_entries and _build_headline_dict are O(n) per feed w
 
 
 in market_service resolve cacultion of volatility
+Marketcalculationservice add trading calender

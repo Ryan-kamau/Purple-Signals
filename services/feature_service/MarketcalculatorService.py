@@ -31,9 +31,6 @@ Responsibilities:
     a "5-day" or "20-day" window
   - Enforce zero lookahead for every feature EXCEPT next_day_return /
     next_day_direction, which are deliberately future-looking targets
-  - Upsert into DailyMarketFeatures, enforcing a 3-update lifetime cap
-    that applies only to writes made by this service (see
-    `market_calc_update_count` on the model)
   - Never populate sentiment / macro / relevance fields — those belong to
     other, future services
   - Persist everything in exactly one transaction per run
@@ -514,7 +511,7 @@ class MarketCalculatorService:
 
         next_close = closes[idx + 1]
         next_return = (next_close / today_close) - 1
-        next_direction = 1 if next_return > 0 else 0
+        next_direction = 1 if next_return > 0 else (-1 if next_return < 0 else None)
         return next_return, next_direction
 
     @staticmethod
@@ -540,10 +537,10 @@ class MarketCalculatorService:
         return {"ticker": ticker, "trading_date": trading_date.isoformat(), "error": message}
 
     # ==================================================================
-    # PERSIST PHASE — single transaction, 3-update lifetime cap enforced
+    # PERSIST PHASE — single transaction, bool update
     # ==================================================================
 
-    def _persist(self, candidates: list[FeatureCandidate]) -> PersistOutcome:
+    def _persist(self, candidates: list[FeatureCandidate], update: bool = False) -> PersistOutcome:
         """
         Upsert every candidate in a single transaction.
 
@@ -573,10 +570,10 @@ class MarketCalculatorService:
                     self.db.add(new_row)
                     outcome.inserted += 1
                     continue
-
-                for column, value in candidate.values.items():
-                    setattr(existing_row, column, value)
-                outcome.updated += 1
+                if update:
+                    for column, value in candidate.values.items():
+                        setattr(existing_row, column, value)
+                    outcome.updated += 1
 
             self.db.commit()
 

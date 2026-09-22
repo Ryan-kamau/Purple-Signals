@@ -17,10 +17,12 @@ No FastAPI routes live here.
  
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from decimal import Decimal
 from zoneinfo import ZoneInfo
+
+from sqlalchemy import func
  
 from sqlalchemy.orm import Session
  
@@ -140,12 +142,9 @@ class MarketService:
         if raw is None:
             logger.warning("KPLC record not found in API response.")
             return None
+
+        return self._process_and_save([raw])
  
-        market_data = self._build_orm_object(raw)
-        if market_data is None:
-            return None
- 
-        return self._save_single(market_data)
     
     # ------------------------------------------------------------------
     # Core pipeline
@@ -170,10 +169,23 @@ class MarketService:
         # Detect fallback source by checking if API data is stale/mocked.
         # The fetcher logs this internally; we track it here for the result.
         source = "live" if total > 0 else "fallback"
+
+        #Add fetching of latest trading dates ofa given ticker
+        tickers = [r["ticker"].upper().strip() for r in raw_records if r.get("ticker")]
+        latest_trading_dates = self._get_latest_trading_dates(tickers)
  
         for raw in raw_records:
             orm_object = self._build_orm_object(raw)
             if orm_object is None:
+                skipped += 1
+                continue
+            last_saved_date = latest_trading_dates.get(orm_object.ticker)
+            if last_saved_date is not None and orm_object.timestamp.date() <= last_saved_date:
+                logger.info(
+                    "Skipping %s — no new trading data since %s "
+                    "(market closed / weekend / holiday, no calendar needed).",
+                    orm_object.ticker, last_saved_date,
+                )
                 skipped += 1
                 continue
  
@@ -195,6 +207,19 @@ class MarketService:
             skipped=skipped,
             source=source,
         )
+
+    #dedupliction check
+    def _get_latest_trading_dates(self, tickers: list[str]) -> dict[str, date]:
+        """Batched (not N+1) lookup of each ticker's most recent stored trading date."""
+        if not tickers:
+            return {}
+        rows = (
+            self._db.query(MarketData.ticker, func.max(MarketData.timestamp))
+            .filter(MarketData.ticker.in_(set(tickers)))
+            .group_by(MarketData.ticker)
+            .all()
+        )
+        return {ticker: ts.date() for ticker, ts in rows if ts is not None}
  
     # ------------------------------------------------------------------
     # Validation

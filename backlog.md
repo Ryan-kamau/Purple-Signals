@@ -9,3 +9,15 @@ Expensive loops: _normalize_entries and _build_headline_dict are O(n) per feed w
 
 in market_service resolve cacultion of volatility
 Marketcalculationservice add trading calender
+
+news_ingestor/rss_news....
+Ingestion caps how meaningful the relevance fields can be. The RSS ingestor drops headlines with impact_score < 2. A plain "KPLC announces X" story with no macro keywords never reaches the table. The fix is a "keep if KPLC mentioned" bypass in the ingestor's filter step.
+
+daily market features taable/.....
+Or better, have your orchestration explicitly enforce the dependency:
+
+market calculation succeeds
+        ↓
+news calculation runs
+
+rather than relying purely on clock times.

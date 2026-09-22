@@ -143,12 +143,6 @@ class DailyMarketFeatures(Base):
     # ─────────────────────────────────────────────
     # NEWS RELEVANCE / IMPACT
     # ─────────────────────────────────────────────
-
-    average_kplc_relevance: Mapped[Optional[float]] = mapped_column(
-        Float,
-        nullable=True
-    )
-
     average_impact_score: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True

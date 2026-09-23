@@ -4,7 +4,7 @@ from typing import Optional
 from sqlalchemy import Date, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from database.base  import Base
+from database.base import Base
 
 
 class DailyMarketFeatures(Base):
@@ -143,6 +143,12 @@ class DailyMarketFeatures(Base):
     # ─────────────────────────────────────────────
     # NEWS RELEVANCE / IMPACT
     # ─────────────────────────────────────────────
+
+    average_kplc_relevance: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True
+    )
+
     average_impact_score: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True

@@ -18,7 +18,7 @@ from pprint import pprint
 from models.macro_data import MacroData
 from services.macro_service import MacroService
 
-KNBS_PDF_URL = "https://www.knbs.or.ke/wp-content/uploads/2026/06/Kenya-Leading-Economic-Indicators-April-2026.pdf"
+KNBS_PDF_URL = "https://www.knbs.or.ke/wp-content/uploads/2026/09/Kenya-Leading-Economic-Indicators-July-2026.pdf"
 
 @pytest.fixture
 def service(db_session):

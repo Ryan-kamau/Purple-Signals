@@ -11,3 +11,5 @@ __pycache__/
 .env
 __temp__/
 temp/
+#logs
+logs/

@@ -1,4 +1,4 @@
-# scripts/run_market_refresh.py
+# scripts/scheduler.py
 """
 Standalone market data refresh — intended to be triggered by an external
 scheduler (Windows Task Scheduler / cron), NOT run inside the FastAPI process.

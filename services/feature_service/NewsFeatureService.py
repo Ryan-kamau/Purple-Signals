@@ -57,15 +57,6 @@ This module deliberately does NOT:
   - Define any FastAPI routes
   - Create its own DB session (always injected, per project convention)
 
-Known follow-ups (tracked, not fixed here):
-  - `average_kplc_relevance` is a legacy column name from the KPLC-only
-    phase of the project; it now holds a generic per-ticker mention
-    density. Renaming it needs a migration (no Alembic in this project
-    yet), so it's left as-is.
-  - ALIAS_OVERRIDES is a small hand-maintained dict until a real
-    company-alias table exists.
-  - No enforced pipeline ordering exists yet between SentimentAnalyzer /
-    MarketCalculatorService / this service — see project backlog.
 """
 
 from __future__ import annotations
@@ -134,11 +125,30 @@ ALIAS_OVERRIDES: dict[str, list[str]] = {
 # ingestion — never re-scored here. Overlaps are fine: one headline can
 # count toward more than one topic.
 TOPIC_REGISTRY: dict[str, dict[str, set[str]]] = {
-    "energy_sentiment": {"categories": {"energy_sector"}},
-    "electricity_sentiment": {"keywords": {"electricity", "tariff", "epra", "power outage"}},
-    "oil_sentiment": {"keywords": {"oil", "fuel"}},
-    "macro_sentiment": {"categories": {"macro_economy"}},
-    "government_sentiment": {"categories": {"kenya_policy"}},
+    "energy_sentiment": {
+        "categories": {"energy_sector"},
+    },
+
+    "electricity_sentiment": {
+        "keywords": {
+            "electricity",
+            "tariff",
+            "epra",
+            "power outage",
+        },
+    },
+    
+    "oil_sentiment": {
+        "keywords": {"oil", "fuel"},
+    },
+
+    "macro_sentiment": {
+        "categories": {"macro_economy"},
+    },
+
+    "government_sentiment": {
+        "categories": {"kenya_policy"},
+    },
 }
 
 # TargetSpec:
@@ -391,9 +401,14 @@ class NewsFeatureService:
         return sorted(set(rows))
 
     def _get_trading_dates(self) -> list[date]:
-        """Trading dates come from real market_data rows, per project convention."""
-        timestamps = self.db.execute(select(MarketData.timestamp)).scalars().all()
-        return sorted({self._to_nairobi_date(ts) for ts in timestamps if ts is not None})
+        """Return every trading date in market_data, sorted ascending."""
+        #this is used cause the db stores time in nairobi timezoneno need to convert
+        trading_dates = self.db.execute(
+            select(func.date(MarketData.timestamp))
+            .distinct()
+            .order_by(func.date(MarketData.timestamp))
+        ).scalars().all()
+        return sorted(set(trading_dates))
 
     # ==================================================================
     # HEADLINE LOADING + BUCKETING (one pass, shared across every ticker)

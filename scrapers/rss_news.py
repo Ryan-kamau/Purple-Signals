@@ -96,6 +96,10 @@ DEFAULT_FEEDS: List[Dict[str, str]] = [
         "url": "https://news.google.com/rss/search?q=site:nation.africa+business&hl=en-KE&gl=KE&ceid=KE:en",
     },
     {
+        "label": "Kenya Times",
+        "url": "https://thekenyatimes.com/feed/",
+    },
+    {
         "label": "Capital FM Business",
         "url": "https://www.capitalfm.co.ke/business/feed/",
     },
@@ -145,7 +149,7 @@ class RSSNewsIngestor:
                                  file. Defaults to KeywordEngine().
         request_timeout:         HTTP timeout in seconds for feedparser. Default: 15.
         fallback_enabled:        Return synthetic articles when a feed is unavailable.
-                                 Default: True.
+                                 Default: False.
         impact_score_threshold:  Minimum impact score for an article to be stored.
                                  Default: IMPACT_SCORE_THRESHOLD (2).
 
@@ -164,7 +168,7 @@ class RSSNewsIngestor:
         session: Session,
         keyword_engine: Optional[KeywordEngine] = None,
         request_timeout: int = 15,
-        fallback_enabled: bool = True,
+        fallback_enabled: bool = False,
         impact_score_threshold: int = IMPACT_SCORE_THRESHOLD,
     ) -> None:
         self._session = session
@@ -369,7 +373,7 @@ class RSSNewsIngestor:
         feeds: Optional[List[Dict[str, str]]] = None,
         keyword_engine: Optional[KeywordEngine] = None,
         request_timeout: int = 15,
-        fallback_enabled: bool = True,
+        fallback_enabled: bool = False,
         impact_score_threshold: int = IMPACT_SCORE_THRESHOLD,
     ) -> List[IngestionResponse]:
         """
@@ -1219,8 +1223,8 @@ if __name__ == "__main__":
         "\n"
         "    db = SessionLocal()\n"
         "    result = RSSNewsIngestor(db).ingest_feed(\n"
-         "https://www.standardmedia.co.ke/rss/business.php",
-        # source_label="The Standard Business",
+        "        \"https://www.standardmedia.co.ke/rss/business.php\",\n"
+        "        # source_label=\"The Standard Business\",\n"
         "    )\n"
         "    print(result)\n"
         "\n"

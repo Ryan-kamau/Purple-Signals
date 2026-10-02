@@ -24,18 +24,6 @@ WHAT IT DOES NOT DO
     - No cleanup / rollback of successful writes. Rows this script causes
       the service to insert or update into daily_market_features are left
       in place — that's the point: prove the real persistence workflow.
-
-ARCHITECTURAL NOTE (read before running):
-    DailyMarketFeatures currently imports its declarative Base from
-    `app.database` while the rest of this project (MarketData, session,
-    init_db) uses `database.base.Base`. Two different Base registries
-    means `daily_market_features` will NOT be created by the project's
-    normal `init_db()` call. If that table doesn't already exist in your
-    real database, every query below will fail with a "table doesn't
-    exist" error — that's a real gap in the model wiring, not a bug in
-    this tester. Fixing it (pointing DailyMarketFeatures at the same
-    `database.base.Base` as everything else) is a follow-up task, out of
-    scope here since it touches the model, not the tester.
 """
 
 import random

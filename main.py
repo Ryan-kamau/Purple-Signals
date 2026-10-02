@@ -14,12 +14,14 @@ Run locally:
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from api import (macroeconomics, market, news, 
                  news_ingestion, fundamentals, macro_ingestor,
                 macroeconomics, sentiment)
 from database.session import init_db
+from scrapers.market_fetcher import MarketFetchError
 
 # ---------------------------------------------------------------------------
 # Logging — structured, one-liner format good for terminal and future log
@@ -44,6 +46,14 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+
+
+# ---------------------------------------------------------------------------
+# Exception handlers
+# ---------------------------------------------------------------------------
+@app.exception_handler(MarketFetchError)
+async def market_fetch_error_handler(request: Request, exc: MarketFetchError):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 # ---------------------------------------------------------------------------

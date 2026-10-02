@@ -95,7 +95,7 @@ def run_news_step() -> dict[str, Any]:
             total_saved, total_duplicates, fallback_feeds,
         )
 
-        if feeds_run == 0:
+        if feeds_run == 0 or feeds_failed == feeds_run:
             status = FAILED
         elif feeds_failed or fallback_feeds:
             # A feed that fell back returns success=True but delivered no

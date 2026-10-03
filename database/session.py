@@ -5,6 +5,7 @@ from database.base import Base
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
+    expire_on_commit=False,
     bind=engine
 )
 

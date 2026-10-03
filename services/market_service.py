@@ -163,7 +163,6 @@ class MarketService:
             MarketDataResult summarising the pipeline run.
         """
         total = len(raw_records)
-        saved_objects: list[MarketData] = []
         skipped = 0
  
         # Detect fallback source by checking if API data is stale/mocked.
@@ -173,12 +172,15 @@ class MarketService:
         #Add fetching of latest trading dates ofa given ticker
         tickers = [r["ticker"].upper().strip() for r in raw_records if r.get("ticker")]
         latest_trading_dates = self._get_latest_trading_dates(tickers)
- 
+
+        orm_objects: list[MarketData] = []
         for raw in raw_records:
             orm_object = self._build_orm_object(raw)
             if orm_object is None:
                 skipped += 1
-                continue
+            else:
+                orm_objects.append(orm_object)
+
             last_saved_date = latest_trading_dates.get(orm_object.ticker)
             if last_saved_date is not None and orm_object.timestamp.date() <= last_saved_date:
                 logger.info(
@@ -188,13 +190,10 @@ class MarketService:
                 )
                 skipped += 1
                 continue
- 
-            saved = self._save_single(orm_object)
-            if saved:
-                saved_objects.append(saved)
-            else:
-                skipped += 1
- 
+
+        saved_objects, save_skipped = self._save_batch(orm_objects)
+        skipped += save_skipped
+
         logger.info(
             "Pipeline complete — total=%d  saved=%d  skipped=%d",
             total, len(saved_objects), skipped,
@@ -481,10 +480,8 @@ class MarketService:
                 exc,
             )
             return None
- 
-    def _save_batch(
-        self, objects: list[MarketData]
-    ) -> tuple[list[MarketData], int]:
+
+    def _save_batch(self, objects):
         """
         Persist a batch of MarketData records in a single transaction.
  
@@ -498,20 +495,19 @@ class MarketService:
         Returns:
             Tuple of (saved_objects, skipped_count).
         """
+        if not objects:
+            return [], 0
+
         try:
             self._db.add_all(objects)
             self._db.commit()
-            for obj in objects:
-                self._db.refresh(obj)
             logger.info("Batch-saved %d records.", len(objects))
             return objects, 0
- 
+
         except Exception as exc:  # noqa: BLE001
             self._db.rollback()
-            logger.warning(
-                "Batch save failed (%s) — falling back to row-by-row.", exc
-            )
- 
+            logger.warning("Batch save failed (%s) — falling back to row-by-row.", exc)
+            # ... fallback block unchanged
             saved: list[MarketData] = []
             skipped = 0
             for obj in objects:

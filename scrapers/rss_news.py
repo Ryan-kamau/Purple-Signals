@@ -50,7 +50,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
-
+import hashlib
 import feedparser
 from sqlalchemy.orm import Session
 
@@ -728,7 +728,8 @@ class RSSNewsIngestor:
             ),
             "description": enriched_article.get("description"),
             "content": enriched_article.get("content"),
-            "url": self._truncate(enriched_article.get("url") or "", 1000),
+            "url": enriched_article.get("url") or "",
+            "url_hash": self._hash_url(enriched_article.get("url") or ""),
             "published_at": published_at,
             "timestamp": self._current_time(),
 
@@ -894,50 +895,36 @@ class RSSNewsIngestor:
     # ------------------------------------------------------------------
     # Private: deduplication
     # ------------------------------------------------------------------
+    @staticmethod
+    def _hash_url(url: str) -> str:
+        """Stable fixed-length key for a URL of any length."""
+        return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
     def _deduplicate(
         self, articles: List[Dict[str, Any]]
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """
-        Remove articles whose URLs already exist in the database or appear
-        more than once within the current batch.
-
-        Uses a chunked IN query to stay within database parameter-count limits.
-
-        Args:
-            articles: Headline-ready article dicts (post-enrichment).
-
-        Returns:
-            Tuple of (new_articles, duplicate_count).
-        """
         if not articles:
             return [], 0
 
-        all_urls = [a["url"] for a in articles if a.get("url")]
-        existing_urls = self._fetch_existing_urls(all_urls)
+        existing_hashes = self._fetch_existing_hashes(
+            [a["url_hash"] for a in articles if a.get("url")]
+        )
 
         new_articles: List[Dict[str, Any]] = []
         duplicate_count = 0
         seen_in_batch: Set[str] = set()
 
         for article in articles:
-            url = article.get("url", "")
-            if url in existing_urls or url in seen_in_batch:
+            h = article.get("url_hash", "")
+            if h in existing_hashes or h in seen_in_batch:
                 duplicate_count += 1
                 continue
-            seen_in_batch.add(url)
+            seen_in_batch.add(h)
             new_articles.append(article)
-
-        logger.debug(
-            "Deduplication complete: total=%d new=%d duplicates=%d",
-            len(articles),
-            len(new_articles),
-            duplicate_count,
-        )
 
         return new_articles, duplicate_count
 
-    def _fetch_existing_urls(self, urls: List[str]) -> Set[str]:
+    def _fetch_existing_hashes(self, hashes: List[str]) -> Set[str]:
         """
         Return the subset of *urls* already present in the headlines table.
 
@@ -950,37 +937,25 @@ class RSSNewsIngestor:
         Returns:
             Set of URLs already stored in the database.
         """
-        if not urls:
+        if not hashes:
             return set()
 
-        unique_urls = list(dict.fromkeys(urls))
+        unique_hashes = list(dict.fromkeys(hashes))
         existing: Set[str] = set()
 
-        for chunk_start in range(0, len(unique_urls), _URL_CHUNK_SIZE):
-            chunk = unique_urls[chunk_start: chunk_start + _URL_CHUNK_SIZE]
+        for start in range(0, len(unique_hashes), _URL_CHUNK_SIZE):
+            chunk = unique_hashes[start:start + _URL_CHUNK_SIZE]
             try:
-                rows = (
-                    self._session.scalars(select(Headline.url)
-                    .where(Headline.url.in_(chunk)))
-                    .all()
-                )
+                rows = self._session.scalars(
+                    select(Headline.url_hash).where(Headline.url_hash.in_(chunk))
+                ).all()
                 existing.update(rows)
             except Exception as exc:
-                logger.error(
-                    "URL dedup query failed for chunk starting at %d: %s",
-                    chunk_start,
-                    exc,
-                )
-                # Don't abort — skip dedup for this chunk; worst case a
-                # duplicate URL gets re-inserted which the unique index will catch.
+                logger.error("Hash dedup query failed at chunk %d: %s", start, exc)
 
-        logger.debug(
-            "Existing URL check: queried=%d existing=%d",
-            len(unique_urls),
-            len(existing),
-        )
         return existing
 
+    
     # ------------------------------------------------------------------
     # Private: bulk insert
     # ------------------------------------------------------------------

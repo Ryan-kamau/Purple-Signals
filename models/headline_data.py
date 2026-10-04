@@ -54,8 +54,10 @@ class Headline(Base):
         nullable=False
     )
 
-    url = Column(String(512), nullable=False, index=True)
+    url = Column(Text, nullable=False)
 
+    url_hash = Column(String(64), nullable=False, unique=True, index=True)
+    
     timestamp = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(

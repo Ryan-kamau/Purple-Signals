@@ -10,6 +10,7 @@ import sys
 from database.session import SessionLocal
 from scrapers.rss_news import RSSNewsIngestor
 from services.market_service import MarketService
+from services.feature_service.MarketcalculatorService import MarketCalculatorService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +37,18 @@ def ingest_rss(db) -> None:
         sum(1 for r in results if not r.success),
     )
 
+def calculate_features(db) -> None:
+    result = MarketCalculatorService(db).process_all()
+    logger.info(
+        "Feature calculation complete: status=%s tickers=%d inserted=%d "
+        "updated=%d skipped=%d",
+        result["status"], result["tickers_processed"],
+        result["rows_inserted"], result["rows_updated"], result["rows_skipped"],
+    )
+    if result["status"] == "failed":
+        # Surface persistence failures so Task Scheduler shows a non-zero exit.
+        raise RuntimeError(f"Feature calculation failed: {result['errors'][-1]}")
+
 
 def run_step(name: str, fn) -> bool:
     """Run one step in its own session; a failure never blocks the next step."""
@@ -55,6 +68,7 @@ def main() -> int:
     ok = [
         run_step("market_refresh", refresh_market),
         run_step("rss_ingestion", ingest_rss),
+        run_step("market_features", calculate_features),
     ]
     return 0 if all(ok) else 1
 

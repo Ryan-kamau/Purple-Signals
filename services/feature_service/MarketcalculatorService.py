@@ -268,7 +268,7 @@ class MarketCalculatorService:
             all_errors.extend(errors)
 
         try:
-            outcome = self._persist(all_candidates)
+            outcome = self._persist(all_candidates, update=True)
         except PersistenceError as exc:
             logger.error("Failed to persist feature batch: %s", exc)
             attempted_rows = len(all_candidates) + len(all_errors)

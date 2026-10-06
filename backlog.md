@@ -23,3 +23,5 @@ news calculation runs
 rather than relying purely on clock times.
 
 news ingestion resolved the selection of news headines to be rellated to wha moves the market especially in kenya
+
+headliines to be converted to text instead of string

@@ -126,7 +126,15 @@ _RSS_PLACEHOLDER_PATTERNS = [
         r"^continue reading\.*$",
     )
 ]
+# Score the headline only. Body text (description/content) is noisy for RSS
+# and Google News. Flip to True to restore the old behaviour.
+SCORE_BODY_TEXT: bool = False
 
+_SOURCE_SUFFIX_PATTERN = re.compile(
+    r"\s+[-–|]\s+(?:business daily(?: africa)?|daily nation|nation africa|the standard|"
+    r"capital fm|kenyans\.co\.ke|the africa report|the star|citizen digital)\s*$",
+    re.IGNORECASE,
+)
 
 class SentimentAnalyzer:
     """
@@ -160,6 +168,7 @@ class SentimentAnalyzer:
         self._finbert = pipeline(
             "text-classification",
             model=FINBERT_MODEL_NAME,
+            top_k = None, #return all class probabilities
         )
 
         self._stats: dict[str, Any] = {}
@@ -287,13 +296,17 @@ class SentimentAnalyzer:
             "Sentiment backfill started: mode=unsentimental batch_size=%d",
             batch_size,
         )
+        last_id: Optional[int] = None
 
         while True:
-            batch = self._fetch_batch(batch_size, only_unsentimental=True)
+            batch = self._fetch_batch(
+                batch_size, only_unsentimental=True, after_id=last_id
+            )
             logger.info("Fetched %d rows", len(batch))
             if not batch:
                 break
 
+            last_id = batch[-1].id
             self._process_batch(batch)
 
         self._stats["execution_time"] = round(time.monotonic() - start_time, 2)
@@ -400,11 +413,13 @@ class SentimentAnalyzer:
 
         parts: list[str] = [self._clean_text(headline)]
 
-        if description and self._is_valid_text(description):
-            parts.append(self._clean_text(description))
+        parts: list[str] = [_SOURCE_SUFFIX_PATTERN.sub("", self._clean_text(headline))]
 
-        if content and self._is_valid_text(content):
-            parts.append(self._clean_text(content))
+        if SCORE_BODY_TEXT:
+            if description and self._is_valid_text(description):
+                parts.append(self._clean_text(description))
+            if content and self._is_valid_text(content):
+                parts.append(self._clean_text(content))
 
         combined = self._collapse_whitespace(" ".join(parts))
 
@@ -556,54 +571,23 @@ class SentimentAnalyzer:
         # The pipeline returns a list with one dict per input string; we
         # pass a single string, so we take the first (only) result.
         result = self._finbert(text, truncation=True)
-        return result[0]
+        # Newer/older transformers versions return [[{...}]] or [{...}]
+        if result and isinstance(result[0], list):
+            result = result[0]
+        return {item["label"].lower(): float(item["score"]) for item in result}
 
     @staticmethod
-    def _compute_weighted_score(result: dict[str, Any]) -> float:
+    def _compute_weighted_score(probs: dict[str, float]) -> float:
         """
-        Convert FinBERT's raw classification output into a single signed
-        float score, instead of persisting the raw label/confidence pair.
+        Calculate directional sentiment from FinBERT class probabilities.
 
-        Mapping:
-            label == "positive"  ->  +confidence
-            label == "negative"  ->  -confidence
-            label == "neutral"   ->   0.0
-
-        Rationale:
-            FinBERT is a 3-class classifier (positive / neutral / negative)
-            with a single confidence score for its predicted class, unlike
-            VADER's multi-component polarity output. Signing the confidence
-            by the predicted label preserves the same [-1.0, 1.0] scale and
-            "more positive = higher, more negative = lower" semantics that
-            downstream code (band classification, alerts, dashboards)
-            already relies on.
-
-        This is intentionally a small, swappable pure function — replace
-        the mapping here to change the scoring algorithm platform-wide
-        without touching any batching/persistence code.
-
-        Args:
-            result: FinBERT's single-result dict: {"label", "score"}.
-
-        Returns:
-            Signed score rounded to 4 decimal places, clamped to
-            [-1.0, 1.0].
+        Score = P(positive) - P(negative), producing a continuous value
+        from -1.0 (negative) to +1.0 (positive). Values near 0 indicate
+        mixed or weak directional sentiment.
         """
-        label = str(result.get("label", "")).lower()
-        confidence = float(result.get("score", 0.0))
+        score = probs.get("positive", 0.0) - probs.get("negative", 0.0)
+        return round(max(-1.0, min(1.0, score)), 4)
 
-        if label == "positive":
-            signed_score = confidence
-        elif label == "negative":
-            signed_score = -confidence
-        else:
-            # "neutral" (or any unexpected label) carries no directional
-            # signal, matching the previous strict-neutral treatment.
-            signed_score = 0.0
-
-        signed_score = max(-1.0, min(1.0, signed_score))
-
-        return round(signed_score, 4)
 
     @staticmethod
     def _classify_score(score: float) -> str:

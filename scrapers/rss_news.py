@@ -38,6 +38,7 @@ Usage:
     result = service.ingest_feed(
         "https://www.businessdailyafrica.com/rss/266",
         source_label="Business Daily Africa",
+        region = "kenya".
     )
 
     # Ingest all default Kenya-relevant feeds:
@@ -55,6 +56,9 @@ import feedparser
 from sqlalchemy.orm import Session
 
 from intelligence.keywords_engine import KeywordEngine
+from intelligence.relevance_filter import RelevanceFilter
+
+
 from models.headline_data import Headline
 from schemas.headline import IngestionResponse
 from sqlalchemy import select
@@ -73,6 +77,7 @@ IMPACT_SCORE_THRESHOLD: int = 2
 # database parameter-count limits (e.g. SQLite's 999-variable limit).
 _URL_CHUNK_SIZE: int = 500
 
+relevance_filter: Optional[RelevanceFilter] = None,   # new kwarg
 # ---------------------------------------------------------------------------
 # Default feed registry
 #
@@ -83,46 +88,52 @@ _URL_CHUNK_SIZE: int = 500
 
 DEFAULT_FEEDS: List[Dict[str, str]] = [
     # ── Local Kenya ─────────────────────────────────────────────────────────
+    # region="kenya" tells RelevanceFilter to trust the Kenya anchor for these feeds.
     {
         "label": "Business Daily Africa",
-        "url": "https://news.google.com/rss/search?q=Business+Daily+Africa&hl=en-KE&gl=KE&ceid=KE:en",
+        "region": "kenya",
+        # site: filter so we only get Business Daily's own articles, not any
+        # article that merely mentions the phrase (same pattern as Nation below).
+        "url": "https://news.google.com/rss/search?q=site:businessdailyafrica.com&hl=en-KE&gl=KE&ceid=KE:en",
     },
     {
         "label": "The Standard Business",
+        "region": "kenya",
         "url": "https://www.standardmedia.co.ke/rss/business.php",
     },
     {
         "label": "Nation Business",
+        "region": "kenya",
         "url": "https://news.google.com/rss/search?q=site:nation.africa+business&hl=en-KE&gl=KE&ceid=KE:en",
     },
     {
-        "label": "Kenya Times",
-        "url": "https://thekenyatimes.com/feed/",
-    },
-    {
         "label": "Capital FM Business",
+        "region": "kenya",
         "url": "https://www.capitalfm.co.ke/business/feed/",
     },
     # ── Global ───────────────────────────────────────────────────────────────
-    {
-        "label": "Reuters Business",
-        "url": "https://feeds.reuters.com/reuters/businessNews",
-    },
+    # region="global" means the strict gate applies: the title must hit an
+    # oil / shipping / Fed / Eurobond channel, or mention Kenya or an NSE company.
     {
         "label": "CNBC Markets",
+        "region": "global",
         "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135",
     },
     {
-        "label": "Financial Times World",
-        "url": "https://www.ft.com/world?format=rss",
-    },
-    {
         "label": "IMF News",
+        "region": "global",
         "url": "https://www.imf.org/en/News/rss?language=eng",
     },
     {
         "label": "World Bank News",
-        "url": "https://news.google.com/rss/search?q=World+Bank&hl=en-KE&gl=KE&ceid=KE:en",
+        "region": "global",
+        # "Kenya" added to the query: the old one returned Thailand, Egypt, Nigeria.
+        "url": "https://news.google.com/rss/search?q=%22World+Bank%22+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    },
+    {
+    "label": "Oil Markets",
+    "region": "global",
+    "url": "https://news.google.com/rss/search?q=Brent+crude+OR+OPEC+OR+Hormuz&hl=en-KE&gl=KE&ceid=KE:en",
     },
 ]
 
@@ -176,6 +187,7 @@ class RSSNewsIngestor:
         self._timeout = request_timeout
         self._fallback_enabled = fallback_enabled
         self._impact_score_threshold = impact_score_threshold
+        self._relevance = relevance_filter or RelevanceFilter()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -185,6 +197,7 @@ class RSSNewsIngestor:
         self,
         feed_url: str,
         source_label: Optional[str] = None,
+        region: str = "kenya"
     ) -> IngestionResponse:
         """
         Fetch, enrich, validate, deduplicate, and persist articles from one RSS feed.
@@ -204,6 +217,7 @@ class RSSNewsIngestor:
             source_label: Human-readable source name used when the RSS entry
                           does not carry its own feed title.
                           Falls back to the feed's own ``feed.title`` or URL.
+            region:       Region of the feed, either "kenya" or "global".
 
         Returns:
             IngestionResponse with counts of fetched / saved / duplicates / invalid.
@@ -301,14 +315,13 @@ class RSSNewsIngestor:
         low_impact_count = 0
 
         for article in enriched_articles:
-            if article.get("impact_score", 0) < self._impact_score_threshold:
-                logger.debug(
-                    "RSS low-impact article skarded: headline=%r impact_score=%d",
-                    str(article.get("title", ""))[:80],
-                    article.get("impact_score", 0),
-                )
+            decision = self._relevance.evaluate(article, is_local=(region == "kenya"))
+            if not decision.keep:
+                logger.debug("RSS rejected: %r", str(article.get("title", ""))[:80])
                 low_impact_count += 1
                 continue
+            article["relevance_tier"] = decision.tier
+            article["matched_tickers"] = decision.tickers
             filtered_articles.append(article)
 
         if low_impact_count:
@@ -415,12 +428,12 @@ class RSSNewsIngestor:
         for feed_def in feed_list:
             url = feed_def.get("url", "")
             label = feed_def.get("label")
+            region = feed_def.get("region", "kenya")
 
             if not url:
                 logger.warning("Skipping feed with missing URL: %s", feed_def)
                 continue
-
-            result = service.ingest_feed(url, source_label=label)
+            result = service.ingest_feed(url, source_label=label, region=region)
             results.append(result)
 
         total_saved = sum(r.saved for r in results)
@@ -1199,7 +1212,8 @@ if __name__ == "__main__":
         "    db = SessionLocal()\n"
         "    result = RSSNewsIngestor(db).ingest_feed(\n"
         "        \"https://www.standardmedia.co.ke/rss/business.php\",\n"
-        "        # source_label=\"The Standard Business\",\n"
+        "        # source_label=\"The Standard Business\",\n",
+        "         region=\"kenya\",\n   "
         "    )\n"
         "    print(result)\n"
         "\n"

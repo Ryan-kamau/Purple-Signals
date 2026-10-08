@@ -49,19 +49,51 @@ def calculate_features(db) -> None:
         # Surface persistence failures so Task Scheduler shows a non-zero exit.
         raise RuntimeError(f"Feature calculation failed: {result['errors'][-1]}")
 
+import time
 
 def run_step(name: str, fn) -> bool:
-    """Run one step in its own session; a failure never blocks the next step."""
-    logger.info("Step started: %s", name)
-    db = SessionLocal()
-    try:
-        fn(db)
-        return True
-    except Exception:
-        logger.exception("Step failed: %s", name)
-        return False
-    finally:
-        db.close()
+    """Run a step with up to 3 attempts; failures never block the next step."""
+    for attempt in range(1, 4):
+        logger.info(
+            "Step started: %s | attempt %d/3",
+            name,
+            attempt,
+        )
+
+        db = SessionLocal()
+        try:
+            fn(db)
+
+            logger.info(
+                "Step succeeded: %s | attempt %d/3",
+                name,
+                attempt,
+            )
+            return True
+
+        except Exception as e:
+            logger.exception(
+                "Step failed: %s | attempt %d/3 | Error: %s",
+                name,
+                attempt,
+                e,
+            )
+
+            if attempt < 3:
+                logger.info(
+                    "Retrying %s in 5 minutes...",
+                    name,
+                )
+                time.sleep(300)
+
+        finally:
+            db.close()
+
+    logger.error(
+        "Step permanently failed after 3 attempts: %s",
+        name,
+    )
+    return False
 
 
 def main() -> int:

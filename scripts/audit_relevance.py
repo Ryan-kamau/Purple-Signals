@@ -27,12 +27,13 @@ def main(apply: bool) -> int:
             if not r.keep:
                 rejected_ids.append(h.id)
                 if len(rejected_samples) < 40:
-                    rejected_samples.append((h.impact_score, h.source, h.headline))
+                    rejected_samples.append((h.impact_score, h.source, h.headline, r.reason))
 
         print("Tier counts:", dict(tiers))
         print("\nSample REJECTED (sorted by impact):")
-        for impact, source, title in sorted(rejected_samples, reverse=True):
+        for impact, source, title, reason in sorted(rejected_samples, key=lambda s: s[0] or 0, reverse=True):
             print(f"  [{impact}] {source}: {title}")
+            print(f"       -> {reason}")
 
         if apply and rejected_ids:
             for i in range(0, len(rejected_ids), 500):

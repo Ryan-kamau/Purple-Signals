@@ -77,7 +77,6 @@ IMPACT_SCORE_THRESHOLD: int = 2
 # database parameter-count limits (e.g. SQLite's 999-variable limit).
 _URL_CHUNK_SIZE: int = 500
 
-relevance_filter: Optional[RelevanceFilter] = None,   # new kwarg
 # ---------------------------------------------------------------------------
 # Default feed registry
 #
@@ -181,6 +180,7 @@ class RSSNewsIngestor:
         request_timeout: int = 15,
         fallback_enabled: bool = False,
         impact_score_threshold: int = IMPACT_SCORE_THRESHOLD,
+        relevance_filter: Optional[RelevanceFilter] = None,   # new kwarg
     ) -> None:
         self._session = session
         self._keyword_engine = keyword_engine or KeywordEngine()

@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from sqlalchemy.orm import Session
 
 from database.session import get_db
-from schemas.fundamentals import FundamentalsIngestResponse, FundamentalsQueryResponse
+from schemas.fundamentals import FundamentalsResponse
 from services.fundamentals_service import FundamentalsService
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ def _get_service(db: Session = Depends(get_db)) -> FundamentalsService:
 
 @router.post(
     "/ingest",
-    response_model=FundamentalsIngestResponse,
+    response_model=FundamentalsResponse,
     summary="Ingest fundamentals from a CSV upload",
     description=(
         "Upload a CSV with columns: ticker, report_date (YYYY-MM-DD), eps, revenue, "
@@ -60,7 +60,7 @@ def _get_service(db: Session = Depends(get_db)) -> FundamentalsService:
 def ingest_fundamentals(
     file: UploadFile = File(..., description="Fundamentals CSV file."),
     service: FundamentalsService = Depends(_get_service),
-) -> FundamentalsIngestResponse:
+) -> FundamentalsResponse:
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
         raise HTTPException(
@@ -104,7 +104,7 @@ def ingest_fundamentals(
 
 @router.get(
     "/latest",
-    response_model=FundamentalsQueryResponse,
+    response_model=FundamentalsResponse,
     summary="Latest fundamentals for a ticker with live P/E",
     description=(
         "Most recent fundamentals row (by report_date) for the ticker, plus "
@@ -114,13 +114,13 @@ def ingest_fundamentals(
 def get_latest_fundamentals(
     ticker: str = Query(..., min_length=1, description="NSE ticker, e.g. KPLC."),
     service: FundamentalsService = Depends(_get_service),
-) -> FundamentalsQueryResponse:
+) -> FundamentalsResponse:
     return service.get_latest(ticker)
 
 
 @router.get(
     "/history",
-    response_model=FundamentalsQueryResponse,
+    response_model=FundamentalsResponse,
     summary="Paginated fundamentals history",
     description="Newest report first. Omit `ticker` to page across all companies.",
 )
@@ -129,5 +129,5 @@ def get_fundamentals_history(
     limit: int = Query(default=10, ge=1, le=100, description="Records per page (1-100)."),
     offset: int = Query(default=0, ge=0, description="Records to skip."),
     service: FundamentalsService = Depends(_get_service),
-) -> FundamentalsQueryResponse:
+) -> FundamentalsResponse:
     return service.get_history(ticker=ticker, limit=limit, offset=offset)

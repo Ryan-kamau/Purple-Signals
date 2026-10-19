@@ -1,3 +1,4 @@
+
 """
 api/news_ingestion.py
 
@@ -25,7 +26,7 @@ Mount in main.py:
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -48,38 +49,51 @@ router = APIRouter(
 
 # ---------------------------------------------------------------------------
 # Feed sub-registries
-# Defined here so they stay in sync with DEFAULT_FEEDS in rss_news.py without
-# duplicating URLs.  Labels are used to filter the shared registry.
+# Derived from DEFAULT_FEEDS so they stay in sync with rss_news.py.
 # ---------------------------------------------------------------------------
-
-_KENYA_LABELS: frozenset[str] = frozenset(
-    {
-        "Business Daily Africa",
-        "Nation Business",
-        "The Standard Business",
-        "Capital FM Business",
-    }
-)
-
-_GLOBAL_LABELS: frozenset[str] = frozenset(
-    {
-        "Reuters Business",
-        "CNBC Markets",
-        "Financial Times World",
-        "IMF News",
-        "World Bank News",
-    }
-)
-
 
 def _kenya_feeds() -> list[dict[str, str]]:
     """Return only Kenyan-source feeds from the default registry."""
-    return [f for f in DEFAULT_FEEDS if f.get("label") in _KENYA_LABELS]
+    return [
+        feed for feed in DEFAULT_FEEDS
+        if feed.get("region", "kenya").lower() == "kenya"
+    ]
 
 
 def _global_feeds() -> list[dict[str, str]]:
     """Return only global macro feeds from the default registry."""
-    return [f for f in DEFAULT_FEEDS if f.get("label") in _GLOBAL_LABELS]
+    return [
+        feed for feed in DEFAULT_FEEDS
+        if feed.get("region", "kenya").lower() == "global"
+    ]
+
+
+def _label_region(label: str) -> str:
+    """Resolve a feed's region tag from its label."""
+    for feed in DEFAULT_FEEDS:
+        if feed.get("label") == label:
+            return feed.get("region", "kenya").lower()
+    return "other"
+
+
+def _resolve_region(
+    url: str,
+    label: str | None,
+    requested_region: str | None,
+) -> str:
+    """Resolve region from an explicit request or the default feed registry."""
+    if requested_region is not None:
+        return requested_region.lower()
+
+    for feed in DEFAULT_FEEDS:
+        if (
+            feed.get("url") == url
+            or (label is not None and feed.get("label") == label)
+        ):
+            return feed.get("region", "kenya").lower()
+
+    # Preserve the previous behaviour for arbitrary feeds.
+    return "kenya"
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +105,7 @@ class FeedIngestRequest(BaseModel):
 
     url: HttpUrl = Field(
         ...,
-        description="The Standard Business",
+        description="RSS/Atom feed URL",
         examples=["https://www.standardmedia.co.ke/rss/business.php"],
     )
     label: str | None = Field(
@@ -101,6 +115,14 @@ class FeedIngestRequest(BaseModel):
             "Falls back to the feed's own title or URL when omitted."
         ),
         examples=["The Standard Business"],
+    )
+    region: Literal["kenya", "global"] | None = Field(
+        default=None,
+        description=(
+            "Optional region override. When omitted, the configured feed "
+            "registry is used; unknown feeds default to Kenya."
+        ),
+        examples=["kenya", "global"],
     )
 
 
@@ -166,7 +188,9 @@ class RSSHealthResponse(BaseModel):
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _aggregate(results: list[IngestionResponse]) -> AggregateIngestionResponse:
+def _aggregate(
+    results: list[IngestionResponse],
+) -> AggregateIngestionResponse:
     """
     Roll up a list of per-feed IngestionResponse objects into aggregate metrics.
 
@@ -198,22 +222,13 @@ def _run_feeds(
     Run RSSNewsIngestor.ingest_all_feeds() for a specific feed list.
 
     Args:
-        feeds: Feed dicts with 'url' and 'label' keys.
+        feeds: Feed dicts with 'url', 'label', and optional 'region' keys.
         db:    Active SQLAlchemy session.
 
     Returns:
         List of IngestionResponse, one per feed.
     """
     return RSSNewsIngestor.ingest_all_feeds(session=db, feeds=feeds)
-
-
-def _label_region(label: str) -> str:
-    """Resolve a feed's region tag from its label."""
-    if label in _KENYA_LABELS:
-        return "kenya"
-    if label in _GLOBAL_LABELS:
-        return "global"
-    return "other"
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +260,21 @@ def ingest_feed(
     fetched / saved / duplicates / invalid articles and any error details.
     """
     url_str = str(body.url)
+    region = _resolve_region(url_str, body.label, body.region)
+
     logger.info(
-        "RSS ingest request: url=%s label=%s",
+        "RSS ingest request: url=%s label=%s region=%s",
         url_str,
         body.label,
+        region,
     )
 
     ingestor = RSSNewsIngestor(db)
-    result = ingestor.ingest_feed(feed_url=url_str, source_label=body.label)
+    result = ingestor.ingest_feed(
+        feed_url=url_str,
+        source_label=body.label,
+        region=region,
+    )
 
     logger.info(
         "RSS ingest complete: url=%s saved=%d duplicates=%d invalid=%d fallback=%s",
@@ -276,7 +298,9 @@ def ingest_feed(
         "Returns per-feed results and rolled-up aggregate metrics."
     ),
 )
-def ingest_all_feeds(db: Session = Depends(get_db)) -> AggregateIngestionResponse:
+def ingest_all_feeds(
+    db: Session = Depends(get_db),
+) -> AggregateIngestionResponse:
     """
     Trigger ingestion for every feed in the default registry.
 
@@ -287,10 +311,7 @@ def ingest_all_feeds(db: Session = Depends(get_db)) -> AggregateIngestionRespons
     ``total_saved``, and the full per-feed ``results`` list so callers can
     inspect individual failures without a follow-up request.
     """
-    logger.info(
-        "RSS ingest/all started: feeds=%d",
-        len(DEFAULT_FEEDS),
-    )
+    logger.info("RSS ingest/all started: feeds=%d", len(DEFAULT_FEEDS))
 
     results = _run_feeds(DEFAULT_FEEDS, db)
     aggregate = _aggregate(results)
@@ -316,7 +337,9 @@ def ingest_all_feeds(db: Session = Depends(get_db)) -> AggregateIngestionRespons
         "Use this for a fast local-market intelligence refresh."
     ),
 )
-def ingest_kenya_feeds(db: Session = Depends(get_db)) -> AggregateIngestionResponse:
+def ingest_kenya_feeds(
+    db: Session = Depends(get_db),
+) -> AggregateIngestionResponse:
     """
     Trigger ingestion for Kenyan-only news sources.
 
@@ -330,7 +353,7 @@ def ingest_kenya_feeds(db: Session = Depends(get_db)) -> AggregateIngestionRespo
 
     if not feeds:
         logger.error(
-            "No Kenyan feeds found in DEFAULT_FEEDS — check label names in rss_news.py"
+            "No Kenyan feeds found in DEFAULT_FEEDS — check region values in rss_news.py"
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -357,12 +380,13 @@ def ingest_kenya_feeds(db: Session = Depends(get_db)) -> AggregateIngestionRespo
     status_code=status.HTTP_200_OK,
     summary="Ingest global macro news sources only",
     description=(
-        "Runs only the global macro feeds: "
-        "Reuters Business, CNBC Markets, Financial Times World, IMF News, World Bank News. "
+        "Runs only the global macro feeds configured in DEFAULT_FEEDS. "
         "Use this to refresh the macro risk and geopolitics intelligence layer."
     ),
 )
-def ingest_global_feeds(db: Session = Depends(get_db)) -> AggregateIngestionResponse:
+def ingest_global_feeds(
+    db: Session = Depends(get_db),
+) -> AggregateIngestionResponse:
     """
     Trigger ingestion for global macro news sources.
 
@@ -377,7 +401,7 @@ def ingest_global_feeds(db: Session = Depends(get_db)) -> AggregateIngestionResp
 
     if not feeds:
         logger.error(
-            "No global feeds found in DEFAULT_FEEDS — check label names in rss_news.py"
+            "No global feeds found in DEFAULT_FEEDS — check region values in rss_news.py"
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -424,14 +448,21 @@ def ingest_custom_feed(
     is used as the source name, falling back to the URL itself.
     """
     url_str = str(body.url)
+    region = _resolve_region(url_str, body.label, body.region)
+
     logger.info(
-        "RSS ingest/custom request: url=%s label=%s",
+        "RSS ingest/custom request: url=%s label=%s region=%s",
         url_str,
         body.label,
+        region,
     )
 
     ingestor = RSSNewsIngestor(db)
-    result = ingestor.ingest_feed(feed_url=url_str, source_label=body.label)
+    result = ingestor.ingest_feed(
+        feed_url=url_str,
+        source_label=body.label,
+        region=region,
+    )
 
     logger.info(
         "RSS ingest/custom complete: url=%s saved=%d fallback=%s",
@@ -499,7 +530,7 @@ def get_feed_registry() -> FeedRegistryResponse:
         FeedRegistryEntry(
             label=feed["label"],
             url=feed["url"],
-            region=_label_region(feed["label"]),
+            region=feed.get("region", "kenya").lower(),
         )
         for feed in DEFAULT_FEEDS
     ]

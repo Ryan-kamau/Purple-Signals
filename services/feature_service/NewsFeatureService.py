@@ -1,3 +1,4 @@
+
 """
 services/feature_service/news_feature_service.py
 
@@ -562,7 +563,6 @@ class NewsFeatureService:
         scored_mentioned = [h for h in mentioned if h.sentiment_score is not None]
 
         relevant_count = len(mentioned)
-        relevance = self._round(relevant_count / len(pool)) if pool else None
         impact = (
             self._round(statistics.fmean(h.impact_score for h in mentioned))
             if mentioned else None
@@ -591,7 +591,6 @@ class NewsFeatureService:
 
         return {
             "relevant_headline_count": relevant_count,
-            "average_kplc_relevance": relevance,
             "average_impact_score": impact,
             "average_sentiment": average_sentiment,
             "weighted_sentiment": weighted_sentiment,

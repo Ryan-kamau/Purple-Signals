@@ -1,13 +1,19 @@
-# schemas/analysis.py
+# schemas/analytics.py
+
+from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel
-from datetime import datetime
 
 
 class AnalysisResultBase(BaseModel):
+    ticker: str
+    trading_date: date
     signal: str
+    strength: str | None = None
     confidence_score: float
     explanation: str
+    components: dict[str, Any] | None = None
 
 
 class AnalysisResultCreate(AnalysisResultBase):

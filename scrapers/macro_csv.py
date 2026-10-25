@@ -337,7 +337,7 @@ if __name__ == "__main__":
     )
 
     if len(sys.argv) < 2:
-        print("Usage: python -m scrapers.macro_csv_parser <csv_path>")
+        print("Usage: python -m scrapers.macro_csv <csv_path>")
         sys.exit(2)
 
     print(json.dumps(MacroCSVParser().parse(sys.argv[1]), indent=2, default=str))

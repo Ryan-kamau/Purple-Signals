@@ -10,6 +10,7 @@ import time
 
 from database.session import SessionLocal
 from intelligence.sentiment_analyzer import SentimentAnalyzer
+from services.feature_service import NewsFeatureService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,8 +45,16 @@ def main() -> int:
                 stats["execution_time"],
             )
 
+            from services.feature_service.NewsFeatureService import NewsFeatureService
+
+            # replace: if stats["failed"] == 0: return 0
             if stats["failed"] == 0:
-                return 0
+                result = NewsFeatureService(db).process_all()
+                logger.info(
+                    "News features complete: status=%s updated=%d skipped=%d",
+                    result["status"], result["rows_updated"], result["rows_skipped"],
+                )
+                return 0 if result["status"] != "failed" else 1
 
             logger.error(
                 "Sentiment run reported %d failed headlines | attempt %d/3",

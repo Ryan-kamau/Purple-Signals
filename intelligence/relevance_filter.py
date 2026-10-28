@@ -169,20 +169,6 @@ NSE_COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "eveready",
         "eveready east africa",
     ),
-    "ORCH": (
-        "kenya orchards",
-        "kenya orchards limited",
-    ),
-    "MSC": (
-        "mumias sugar",
-        "mumias sugar company",
-        "mumias sugar co",
-    ),
-    "BAUM": (
-        "baumann",
-        "a. baumann",
-        "a baumann",
-    ),
     "CIC": (
         "cic insurance",
         "cic insurance group",
@@ -201,7 +187,7 @@ NSE_COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "kenya reinsurance",
         "kenya reinsurance corporation",
     ),
-    "CFCI": (
+    "LBTY": (
         "liberty kenya",
         "liberty kenya holdings",
         "liberty life kenya",
@@ -215,18 +201,9 @@ NSE_COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "olympia capital",
         "olympia capital holdings",
     ),
-    "TCL": (
-        "transcentury",
-        "trans-century",
-        "trans-century investments",
-    ),
     "XPRS": (
         "express kenya",
         "express kenya plc",
-    ),
-    "HBE": (
-        "homeboyz entertainment",
-        "homeboyz",
     ),
     "FTGH": (
         "flame tree",
@@ -237,6 +214,76 @@ NSE_COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "home africa",
         "home afrika",
         "home afrika limited",
+    ),
+    "GLD": (
+        "absa newgold etf",
+        "newgold",
+        "newgold etf",
+    ),
+
+    "AMAC": (
+        "africa mega agricorp",
+        "african mega agricorp",
+        "amac",
+    ),
+
+    "BKG": (
+        "bk group",
+    ),
+
+    "CRWN": (
+        "crown paints",
+        "crown paints kenya",
+    ),
+
+    "PORT": (
+        "e.a. portland cement",
+        "ea portland cement",
+        "east african portland cement",
+        "east african portland cement company",
+    ),
+
+    "NBV": (
+        "nairobi business ventures",
+    ),
+
+    "SLAM": (
+        "sanlam kenya",
+    ),
+
+    "SMWF": (
+        "satrix msci world feeder etf",
+        "satrix msci world",
+    ),
+
+    "SKL": (
+        "shri krishana overseas",
+    ),
+
+    "SGL": (
+        "standard group",
+        "standard group plc",
+    ),
+
+    "TOTL": (
+        "totalenergies marketing kenya",
+        "total energies marketing kenya",
+    ),
+
+    "UCHM": (
+        "uchumi supermarket",
+        "uchumi",
+    ),
+
+    "UMME": (
+        "umeme",
+        "umeme limited",
+    ),
+
+    "SCAN": (
+        "wpp scangroup",
+        "scangroup",
+        "wpp scan group",
     ),
 }
 

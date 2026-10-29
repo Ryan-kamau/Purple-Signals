@@ -17,5 +17,5 @@ class Alert(Base):
 
     severity = Column(String(100))
 
-    timestamp = Column(DateTime(timezone=True), 
+    timestamp = Column(DateTime(timezone=True),
                        default=datetime.now(ZoneInfo("Africa/Nairobi")))

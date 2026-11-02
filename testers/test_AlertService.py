@@ -6,23 +6,22 @@ Same style as the other testers: plain script, [PASS]/[FAIL] counters.
 
     python -m testers.test_AlertService
 
-ISOLATED: forces DATABASE_URL to SQLite BEFORE any project import and uses a
-fresh throw-away SQLite file per test. It never touches the real MySQL
-database. (SQLite does not enforce MySQL's FOR UPDATE; the race tests exercise
-the UNIQUE(active_ticker) backstop + retry path, which is the real guarantee.)
+ISOLATED: requires TEST_DATABASE_URL pointing to a dedicated MySQL test database.
+The test tables are reset for each test. Never use a production database.
 """
 
 import os
 import sys
-import tempfile
 import threading
 from datetime import date, timedelta
+from dotenv import load_dotenv
 
-os.environ["DATABASE_URL"] = "sqlite://"  # must precede project imports (load_dotenv does not override)
+
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, event, func, select  # noqa: E402
+from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.exc import IntegrityError, OperationalError  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
@@ -37,6 +36,7 @@ from models.analytics_data import AnalysisResult  # noqa: E402
 from models.daily_market_features import DailyMarketFeatures  # noqa: E402
 from services.alert_service.AlertEvaluationService import AlertEvaluationService  # noqa: E402
 
+load_dotenv()
 _PASS = _FAIL = 0
 TODAY = date(2026, 9, 23)
 D1, D2, D3 = date(2026, 9, 21), date(2026, 9, 22), date(2026, 9, 23)
@@ -58,12 +58,19 @@ def section(t: str) -> None:
 
 
 class Env:
-    """Fresh SQLite file + project-style sessionmaker for one test."""
+    """Dedicated MySQL test database + project-style sessionmaker for one test."""
 
     def __init__(self) -> None:
-        fd, self.path = tempfile.mkstemp(suffix=".db", prefix="alerts_test_")
-        os.close(fd)
-        self.engine = create_engine(f"sqlite:///{self.path}", connect_args={"timeout": 15})
+        url = os.environ.get("TEST_DATABASE_URL", "")
+        parsed = make_url(url) if url else None
+        if (parsed is None or parsed.get_backend_name() != "mysql"
+                or not (parsed.database or "").lower().endswith("_test")):
+            raise RuntimeError(
+                "Set TEST_DATABASE_URL to a dedicated MySQL database ending in _test "
+                "(e.g. mysql+pymysql://user:password@localhost/purple_signals_test)."
+            )
+        self.engine = create_engine(url, pool_pre_ping=True, isolation_level="READ COMMITTED")
+        Base.metadata.drop_all(self.engine)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(autocommit=False, autoflush=False,
                                     expire_on_commit=False, bind=self.engine)
@@ -98,7 +105,7 @@ class Env:
     def close(self):
         self.db.close()
         self.engine.dispose()
-        os.remove(self.path)
+
 
 
 def ev(env, ticker=None):
@@ -451,33 +458,18 @@ def test_races() -> None:
     finally:
         e.close()
 
-    # real threads, separate sessions, forced to overlap
+    # real threads, separate sessions; MySQL FOR UPDATE serializes conflicting rows
     ok_runs = 0
     for run in range(5):
         e = Env()
         try:
             for t in ("T1", "T2", "T3"):
                 e.signal(t, D2, "bullish", "strong", 1.0)
-            barrier = threading.Barrier(2, timeout=10)
             results, errs = [], []
 
             def worker():
                 db = e.Session()
                 svc = AlertEvaluationService(db)
-                orig = svc._load_active_locked
-                first = {"done": False}
-
-                def synced(ticker):
-                    row = orig(ticker)
-                    if not first["done"]:
-                        first["done"] = True
-                        try:
-                            barrier.wait()
-                        except threading.BrokenBarrierError:
-                            pass
-                    return row
-
-                svc._load_active_locked = synced
                 try:
                     results.append(svc.evaluate(today=TODAY))
                 except Exception as exc:  # noqa: BLE001
@@ -563,7 +555,7 @@ def test_api() -> None:
 
 
 def main() -> int:
-    print("=" * 70 + "\nAlert Engine test (isolated SQLite — real MySQL untouched)\n" + "=" * 70)
+    print("=" * 70 + "\nAlert Engine test (dedicated MySQL test database)\n" + "=" * 70)
     for fn in (test_rules, test_five_classes_and_basic, test_updates, test_transitions,
                test_missing_stale_outdated_invalid, test_failures_and_atomicity, test_races, test_api):
         try:

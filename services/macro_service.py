@@ -501,9 +501,6 @@ class MacroService:
 
         self._db.commit()
 
-        for record in stats.records:
-            self._db.refresh(record)
-
         logger.info(
             "Committed: Inserted=%d Updated=%d Unchanged=%d",
             len(stats.inserted), len(stats.updated), len(stats.unchanged),

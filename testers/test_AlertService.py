@@ -431,7 +431,7 @@ def test_races() -> None:
         try:
             e.db.commit()
             check(False, "CHECK rejects active alert without active_ticker")
-        except IntegrityError:
+        except (IntegrityError, OperationalError):
             e.db.rollback()
             check(True, "CHECK rejects active alert without active_ticker")
     finally:

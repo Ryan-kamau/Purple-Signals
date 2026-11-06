@@ -164,8 +164,9 @@ def _signal(ticker, d, label, strength=None, conf=0.0, **kw):
 
 def _alert(ticker, alert_type, status, **kw):
     return _make(
-        Alert, ticker=ticker, alert_type=alert_type, status=status, severity=kw.get("severity", "high"),
-        message=f"{alert_type} on {ticker}", trading_date=kw.get("trading_date", date(2026, 11, 2)),
+        Alert, ticker=ticker, alert_type=alert_type, status=status,active_ticker=ticker if status == "active" else None,
+        severity=kw.get("severity", "high"),message=f"{alert_type} on {ticker}", 
+        trading_date=kw.get("trading_date", date(2026, 11, 2)),
         signal_strength="strong", confidence_score=0.9,
         first_detected_at=_ts(2026, 11, 2, 16), last_detected_at=_ts(2026, 11, 3, 16),
         evidence={"volume_ratio": 3.4}, timestamp=_ts(2026, 11, 3, 16),

@@ -3,11 +3,20 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from database.base import Base
 
-from sqlalchemy import Column, Integer, String, DateTime, Numeric
+from sqlalchemy import Column, Integer, String, DateTime, Numeric, Float, Double, UniqueConstraint
 
-# Inside your existing model class:
+
 class Fundamentals(Base):
     __tablename__ = "fundamentals"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "ticker",
+            "report_date",
+            name="uq_fundamentals_ticker_report_date",
+        ),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
 
     ticker = Column(String(10), nullable=False, index=True)
@@ -19,7 +28,9 @@ class Fundamentals(Base):
     eps = Column(Numeric(12, 4))
     pe_ratio = Column(Numeric(12, 4))
     dividend_yield = Column(Numeric(12, 6))
-    revenue = Column(Numeric(20, 2))
+    dividend_per_share = Column(Float)
+    revenue = Column(Double)
+    net_profit = Column(Double)
     debt_ratio = Column(Numeric(12, 6))
     net_profit_margin = Column(Numeric(12, 6))
 

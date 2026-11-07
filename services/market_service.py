@@ -143,8 +143,17 @@ class MarketService:
             logger.warning("KPLC record not found in API response.")
             return None
 
-        return self._process_and_save([raw])
- 
+        result = self._process_and_save([raw])
+
+        if result.records:
+            return result.records[0]
+
+        return (
+            self._db.query(MarketData)
+            .filter(MarketData.ticker == "KPLC")
+            .order_by(MarketData.timestamp.desc(), MarketData.id.desc())
+            .first()
+)
     
     # ------------------------------------------------------------------
     # Core pipeline

@@ -171,25 +171,34 @@ class MarketService:
 
         #Add fetching of latest trading dates ofa given ticker
         tickers = [r["ticker"].upper().strip() for r in raw_records if r.get("ticker")]
-        latest_trading_dates = self._get_latest_trading_dates(tickers)
+        tickers = [
+            r["ticker"].upper().strip()
+            for r in raw_records
+            if r.get("ticker")
+        ]
+
+        latest_timestamps = self._get_latest_timestamps(tickers)
 
         orm_objects: list[MarketData] = []
+
         for raw in raw_records:
             orm_object = self._build_orm_object(raw)
+
             if orm_object is None:
                 skipped += 1
-            else:
-                orm_objects.append(orm_object)
+                continue
 
-            last_saved_date = latest_trading_dates.get(orm_object.ticker)
-            if last_saved_date is not None and orm_object.timestamp.date() <= last_saved_date:
+            last_saved = latest_timestamps.get(orm_object.ticker)
+
+            if last_saved is not None and orm_object.timestamp <= last_saved:
                 logger.info(
-                    "Skipping %s — no new trading data since %s "
-                    "(market closed / weekend / holiday, no calendar needed).",
-                    orm_object.ticker, last_saved_date,
+                    "Skipping %s — timestamp already stored or older.",
+                    orm_object.ticker,
                 )
                 skipped += 1
                 continue
+
+            orm_objects.append(orm_object)
 
         saved_objects, save_skipped = self._save_batch(orm_objects)
         skipped += save_skipped
@@ -207,18 +216,27 @@ class MarketService:
             source=source,
         )
 
-    #dedupliction check
-    def _get_latest_trading_dates(self, tickers: list[str]) -> dict[str, date]:
-        """Batched (not N+1) lookup of each ticker's most recent stored trading date."""
+    #dedupliction checks
+    def _get_latest_timestamps(self, tickers: list[str]) -> dict[str, datetime]:
+        """Batched (not N+1) lookup of each ticker's most recent stored trading date with timestamp."""
         if not tickers:
             return {}
+
         rows = (
-            self._db.query(MarketData.ticker, func.max(MarketData.timestamp))
+            self._db.query(
+                MarketData.ticker,
+                func.max(MarketData.timestamp)
+            )
             .filter(MarketData.ticker.in_(set(tickers)))
             .group_by(MarketData.ticker)
             .all()
         )
-        return {ticker: ts.date() for ticker, ts in rows if ts is not None}
+
+        return {
+            ticker: ts
+            for ticker, ts in rows
+            if ts is not None
+        }
  
     # ------------------------------------------------------------------
     # Validation

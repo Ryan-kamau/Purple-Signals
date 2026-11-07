@@ -16,7 +16,7 @@ import sys
 import time
 
 from database.session import SessionLocal
-from services.signal_service import SignalService
+from services.signal_service.SignalService import SignalService
 
 
 # ------------------------------------------------------------------
@@ -51,19 +51,18 @@ def generate_signals(db) -> None:
         RuntimeError: If the service reports a failed run.
     """
 
-    result = SignalService(db).generate_signals()
+    result = SignalService(db).process_all()
 
     # Log structured results if the service returns a dictionary.
     if isinstance(result, dict):
 
         logger.info(
             "Signal generation complete: "
-            "status=%s generated=%s updated=%s skipped=%s failed=%s",
+            "status=%s processed=%s updated=%s skipped=%s",
             result.get("status", "unknown"),
-            result.get("generated", 0),
-            result.get("updated", 0),
-            result.get("skipped", 0),
-            result.get("failed", 0),
+            result.get("rows_processed", 0),
+            result.get("rows_updated", 0),
+            result.get("rows_skipped", 0),
         )
 
         # Treat reported failures as a failed scheduler run.

@@ -19,7 +19,8 @@ from fastapi.responses import JSONResponse
 
 from api import (macroeconomics, market, news, 
                  news_ingestion, fundamentals, macro_ingestor,
-                macroeconomics, sentiment, signals, macro_features)
+                macroeconomics, sentiment, signals, macro_features, 
+                alerts, analysis, macro_features)
 from database.session import init_db
 from scrapers.market_fetcher import MarketFetchError
 
@@ -74,10 +75,11 @@ app.include_router(news_ingestion.router)
 app.include_router(fundamentals.router)
 app.include_router(macro_ingestor.router)
 app.include_router(macroeconomics.router)
+app.include_router(macro_features.router)
 app.include_router(sentiment.router)
 app.include_router(signals.router)
-app.include_router(macro_features.router)
-
+app.include_router(alerts.router)
+app.include_router(analysis.router)
 # ---------------------------------------------------------------------------
 # Health check — useful for Docker / k8s probes and quick smoke tests.
 # ---------------------------------------------------------------------------

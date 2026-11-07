@@ -5,10 +5,21 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from database.base import Base
+from sqlalchemy import UniqueConstraint
+
+class MarketData(Base):
+    __tablename__ = "market_data"
 
 
 class MarketData(Base):
     __tablename__ = "market_data"
+    __table_args__ = (
+        UniqueConstraint(
+            "ticker",
+            "timestamp",
+            name="uq_market_ticker_timestamp"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 

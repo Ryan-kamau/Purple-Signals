@@ -115,7 +115,11 @@ _CORPORATE_SUFFIX_PATTERN = re.compile(
 # have yet. Extend freely as new tickers are onboarded.
 ALIAS_OVERRIDES: dict[str, list[str]] = {
     "KPLC": ["Kenya Power"],
-    "EQTY": ["Equity Bank"],
+    "EQTY": [
+        "Equity Group",
+        "Equity Group Holdings",
+        "Equity Bank",
+    ],
     "SCOM": ["Safaricom"],
     "KCB": ["KCB Group"],
     "COOP": ["Co-operative Bank", "Co-op Bank"],

@@ -27,7 +27,7 @@ Mount in main.py:
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
@@ -209,7 +209,7 @@ def get_by_year(
 ) -> MacroQueryResponse:
     logger.info("GET /macroeconomics/year/%s received", year)
     service = MacroQueryService(db)
-    result = service.get_by_year(year=year, limit=limit, offset=offset)
+    result = service.get_year(year=year, limit=limit, offset=offset)
     logger.info("GET /macroeconomics/year/%s completed", year)
     return result
 

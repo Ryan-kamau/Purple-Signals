@@ -19,10 +19,9 @@ NSE_COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "safaricom plc",
     ),
     "EQTY": (
-        "equity group",
-        "equity group holdings",
-        "equity bank",
-        "equity",
+    "equity group",
+    "equity group holdings",
+    "equity bank",
     ),
     "KCB": (
         "kcb",
@@ -289,10 +288,35 @@ NSE_COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 
 
-_COMPANY_PATTERNS = {
-    ticker: re.compile(r"\b(?:" + "|".join(re.escape(a) for a in aliases) + r")\b", re.IGNORECASE)
-    for ticker, aliases in NSE_COMPANY_ALIASES.items()
-}
+_COMPANY_PATTERNS = {}
+
+for ticker, aliases in NSE_COMPANY_ALIASES.items():
+    # Match ticker symbols case-sensitively.
+    ticker_pattern = re.compile(
+        rf"\b{re.escape(ticker)}\b"
+    )
+
+    # Match company names case-insensitively.
+    name_aliases = [
+        alias
+        for alias in aliases
+        if alias.upper() != ticker
+        and alias.lower() not in {
+            "equity", "port", "scan", "arm", "bat"
+        }
+    ]
+
+    name_pattern = (
+        re.compile(
+            r"\b(?:" +
+            "|".join(re.escape(a) for a in name_aliases) +
+            r")\b",
+            re.IGNORECASE,
+        )
+        if name_aliases else None
+    )
+
+    _COMPANY_PATTERNS[ticker] = (ticker_pattern, name_pattern)
 
 # Institutions/places only -- no politicians' names (they go stale).
 _KENYA_ANCHOR = re.compile(
@@ -440,8 +464,15 @@ class RelevanceFilter:
     MIN_GLOBAL_IMPACT = 3
 
     def find_tickers(self, text: str) -> Tuple[str, ...]:
-        return tuple(t for t, p in _COMPANY_PATTERNS.items() if p.search(text))
+        matches = []
 
+        for ticker, (ticker_pattern, name_pattern) in _COMPANY_PATTERNS.items():
+            if ticker_pattern.search(text):
+                matches.append(ticker)
+            elif name_pattern is not None and name_pattern.search(text):
+                matches.append(ticker)
+
+        return tuple(matches)
     def evaluate(self, article: Dict[str, Any], *, is_local: bool) -> RelevanceResult:
         title = str(article.get("title") or "")
         scope = f"{title} {article.get('description') or ''}"

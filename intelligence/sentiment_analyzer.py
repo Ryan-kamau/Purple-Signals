@@ -52,6 +52,7 @@ Future-proofing:
 from __future__ import annotations
 
 import html
+from functools import lru_cache
 import logging
 import re
 import time
@@ -82,6 +83,16 @@ MIN_TEXT_LENGTH: int = 3
 # constant so swapping the model later is a one-line change.
 FINBERT_MODEL_NAME: str = "ProsusAI/finbert"
 
+
+@lru_cache(maxsize=1)
+def _get_finbert_pipeline():
+    """Lazily initialize and reuse FinBERT once per Python process."""
+    return pipeline(
+        "text-classification",
+        model=FINBERT_MODEL_NAME,
+        top_k=None,
+    )
+
 # Score interpretation bands (documented in the class docstring / PRD).
 STRONG_POSITIVE_MIN: float = 0.50
 MODERATE_POSITIVE_MIN: float = 0.20
@@ -91,7 +102,7 @@ MODERATE_NEGATIVE_MAX: float = -0.20
 STRONG_NEGATIVE_MAX: float = -0.50
 
 # Score labels — not persisted (the DB only stores the float), but exposed
-# via _classify_score() / classify_score() for downstream modules (alerts,
+# via classify_score() for downstream modules (alerts,
 # dashboards) that want a human-readable label.
 LABEL_STRONG_POSITIVE: str = "Strong Positive"
 LABEL_MODERATE_POSITIVE: str = "Moderate Positive"
@@ -158,18 +169,6 @@ class SentimentAnalyzer:
                 a caller-managed SessionLocal()). Never created internally.
         """
         self.db = db
-
-        # FinBERT is expensive to instantiate (loads model weights + tokenizer
-        # from HuggingFace) — build exactly once per analyzer instance, never
-        # inside a loop. The pipeline returns the single highest-confidence
-        # label per call by default (top_k=None would return all three; we
-        # only need the winner, matching the previous VADER single-score
-        # behaviour).
-        self._finbert = pipeline(
-            "text-classification",
-            model=FINBERT_MODEL_NAME,
-            top_k = None, #return all class probabilities
-        )
 
         self._stats: dict[str, Any] = {}
         self._reset_statistics()
@@ -570,7 +569,7 @@ class SentimentAnalyzer:
         """
         # The pipeline returns a list with one dict per input string; we
         # pass a single string, so we take the first (only) result.
-        result = self._finbert(text, truncation=True)
+        result = _get_finbert_pipeline()(text, truncation=True)
         # Newer/older transformers versions return [[{...}]] or [{...}]
         if result and isinstance(result[0], list):
             result = result[0]
@@ -590,7 +589,7 @@ class SentimentAnalyzer:
 
 
     @staticmethod
-    def _classify_score(score: float) -> str:
+    def classify_score(score: float) -> str:
         """
         Convert a signed sentiment score into a human-readable label.
 
@@ -838,7 +837,7 @@ if __name__ == "__main__":
         )
         print(f"\nPreview score: {preview_score}")
         if preview_score is not None:
-            print(f"Preview label: {service._classify_score(preview_score)}")
+            print(f"Preview label: {service.classify_score(preview_score)}")
 
         stats = service.update_all_headlines(300)
         print("\nRun statistics:")

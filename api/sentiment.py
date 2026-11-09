@@ -46,7 +46,6 @@ from schemas.sentiment import (
     AnalyzeHeadlineResponse,
     AnalyzeRecordData,
     AnalyzeRecordResponse,
-    StatisticsResponse,
     UpdateSentimentResponse,
     UpdateSentimentStatsData,
 )
@@ -187,7 +186,7 @@ def analyze_text(
             detail="The supplied text contains no meaningful, scorable content.",
         )
 
-    label = service._classify_score(score)
+    label = service.classify_score(score)
 
     return AnalyzeHeadlineResponse(
         status="success",
@@ -243,7 +242,7 @@ def analyze_record(
     except Exception as exc:  # noqa: BLE001
         _handle_unexpected(exc, f"PUT /sentiment/analyze-record/{headline_id}")
 
-    label = service._classify_score(score) if score is not None else None
+    label = service.classify_score(score) if score is not None else None
     message = (
         "Headline sentiment analyzed successfully."
         if score is not None
@@ -306,7 +305,7 @@ def analyze_batch(
             id=item["id"],
             score=item["score"],
             sentiment_label=(
-                service._classify_score(item["score"])
+                service.classify_score(item["score"])
                 if item["score"] is not None
                 else None
             ),
@@ -396,38 +395,5 @@ def update_all(
     return UpdateSentimentResponse(
         status="success",
         message=stats.get("message", "Sentiment update run completed."),
-        data=_build_stats_data(stats),
-    )
-
-
-# ---------------------------------------------------------------------------
-# 6. Statistics
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/statistics",
-    response_model=StatisticsResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Return statistics from the most recent sentiment update run",
-    description=(
-        "Returns SentimentAnalyzer.get_statistics() — the statistics from "
-        "the most recently completed update_unsentimental_headlines() or "
-        "update_all_headlines() run on this service instance. All counters "
-        "are zero with status='no_data' if no run has completed yet."
-    ),
-    responses={500: {"description": "Unexpected server error."}},
-)
-def get_statistics(
-    service: SentimentAnalyzer = Depends(_get_sentiment_service),
-) -> StatisticsResponse:
-    """Return the most recently computed sentiment run statistics."""
-    try:
-        stats = service.get_statistics()
-    except Exception as exc:  # noqa: BLE001
-        _handle_unexpected(exc, "GET /sentiment/statistics")
-
-    return StatisticsResponse(
-        status="success",
-        message="Statistics retrieved successfully.",
         data=_build_stats_data(stats),
     )

@@ -21,4 +21,4 @@ class SentimentScore(Base):
     confidence = Column(Float)
 
     timestamp = Column(DateTime(timezone=True), 
-                       default=datetime.now(ZoneInfo("Africa/Nairobi")))
+                       default=lambda: datetime.now(ZoneInfo("Africa/Nairobi")))

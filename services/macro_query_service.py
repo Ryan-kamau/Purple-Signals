@@ -37,13 +37,14 @@ instances ever cross the public API boundary.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Column
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Query, Session
+from sqlalchemy import case, cast, Integer
 
 from models.macro_data import MacroData
 
@@ -226,8 +227,7 @@ class MacroQueryService:
             Success envelope with `data` containing zero or one serialized
             record.
         """
-        resolved_date = self._ensure_timezone(report_date)
-
+        resolved_date = self._normalize_date(report_date)
         try:
             record = (
                 self._db.query(MacroData)
@@ -376,8 +376,8 @@ class MacroQueryService:
         if not is_valid:
             return self._failure_response(message=error)
 
-        resolved_start = self._ensure_timezone(start_date)
-        resolved_end = self._ensure_timezone(end_date)
+        resolved_start = self._normalize_date(start_date)
+        resolved_end = self._normalize_date(end_date)
 
         conditions = [
             MacroData.report_date >= resolved_start,
@@ -761,7 +761,7 @@ class MacroQueryService:
             conditions.append(MacroData.year == str(year).strip())
 
         if report_date is not None:
-            conditions.append(MacroData.report_date == self._ensure_timezone(report_date))
+            conditions.append(MacroData.report_date == self._normalize_date(report_date))
 
         range_filters: list[tuple[Column, Optional[float], Optional[float]]] = [
             (MacroData.inflation, inflation_min, inflation_max),
@@ -837,9 +837,29 @@ class MacroQueryService:
         Returns:
             Sorted query.
         """
+        month_order = case(
+            {
+                month: index
+                for index, month in enumerate(MONTH_ORDER, start=1)
+            },
+            value=MacroData.month,
+            else_=0,
+        )
+
+        year_order = cast(MacroData.year, Integer)
+
         if order == "desc":
-            return query.order_by(MacroData.report_date.desc(), MacroData.id.desc())
-        return query.order_by(MacroData.report_date.asc(), MacroData.id.asc())
+            return query.order_by(
+                year_order.desc(),
+                month_order.desc(),
+                MacroData.id.desc(),
+            )
+
+        return query.order_by(
+            year_order.asc(),
+            month_order.asc(),
+            MacroData.id.asc(),
+        )
 
     @staticmethod
     def _apply_pagination(query: Query, limit: int, offset: int) -> Query:
@@ -984,7 +1004,10 @@ class MacroQueryService:
         """
         if start_date is None or end_date is None:
             return False, "Both start_date and end_date are required."
-        if start_date > end_date:
+        if (
+            MacroQueryService._normalize_date(start_date)
+            > MacroQueryService._normalize_date(end_date)
+        ):
             return False, "start_date must not be after end_date."
         return True, None
 
@@ -1048,8 +1071,8 @@ class MacroQueryService:
         Returns:
             List of matching MacroData ORM objects.
         """
-        resolved_start = self._ensure_timezone(start_date)
-        resolved_end = self._ensure_timezone(end_date)
+        resolved_start = self._normalize_date(start_date)
+        resolved_end = self._normalize_date(end_date)
 
         query = self._apply_filters(
             self._build_query(),
@@ -1063,6 +1086,16 @@ class MacroQueryService:
     # ------------------------------------------------------------------
     # PRIVATE — statistics / summary builders
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _record_sort_key(record: MacroData) -> tuple[int, int, int]:
+        """Return chronological ordering by observation year and month."""
+        month = str(record.month or "").strip().capitalize()
+        return (
+            int(record.year) if record.year and str(record.year).isdigit() else 0,
+            MONTH_ORDER.index(month) + 1 if month in MONTH_ORDER else 0,
+            record.id or 0,
+        )
 
     def _build_summary(self, records: list[MacroData]) -> dict[str, Any]:
         """
@@ -1086,7 +1119,8 @@ class MacroQueryService:
             }
 
         sorted_records = sorted(
-            records, key=lambda r: r.report_date or datetime.min.replace(tzinfo=NAIROBI_TZ)
+            records,
+            key=self._record_sort_key,
         )
         earliest = sorted_records[0]
         latest = sorted_records[-1]
@@ -1152,7 +1186,8 @@ class MacroQueryService:
             no non-null observations.
         """
         chronological = sorted(
-            records, key=lambda r: r.report_date or datetime.min.replace(tzinfo=NAIROBI_TZ)
+            records,
+            key=self._record_sort_key,
         )
 
         values_in_order = [
@@ -1258,6 +1293,15 @@ class MacroQueryService:
         if not value:
             return None
         return str(value).strip().capitalize()
+
+    
+    @staticmethod
+    def _normalize_date(value: date | datetime) -> date:
+        """Convert datetime to date; leave date values unchanged."""
+        if isinstance(value, datetime):
+            return value.date()
+        return value
+
 
     @staticmethod
     def _ensure_timezone(value: datetime) -> datetime:

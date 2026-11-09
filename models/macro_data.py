@@ -36,4 +36,4 @@ class MacroData(Base):
     inflation_trend = Column(Float)
 
     timestamp = Column(Date, 
-                       default=datetime.now(ZoneInfo("Africa/Nairobi")))
+                       default=lambda: datetime.now(ZoneInfo("Africa/Nairobi")))

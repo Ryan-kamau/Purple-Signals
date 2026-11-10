@@ -265,7 +265,7 @@ class NewsQueryService:
         self,
         db_session: Session,
         *,
-        limit: int = 20,
+        limit: int = 50,
     ) -> list[Any]:
         """
         Return headlines ranked by intelligence impact score.

@@ -9,10 +9,6 @@ from sqlalchemy import UniqueConstraint
 
 class MarketData(Base):
     __tablename__ = "market_data"
-
-
-class MarketData(Base):
-    __tablename__ = "market_data"
     __table_args__ = (
         UniqueConstraint(
             "ticker",

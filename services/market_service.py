@@ -198,6 +198,12 @@ class MarketService:
                 continue
 
             last_saved = latest_timestamps.get(orm_object.ticker)
+            if last_saved is not None:
+
+                # MySQL returns a naive datetime.
+                # Restore the timezone that was used when storing it.
+                if last_saved.tzinfo is None:
+                    last_saved = last_saved.replace(tzinfo=NAIROBI_TZ)
 
             if last_saved is not None and orm_object.timestamp <= last_saved:
                 logger.info(

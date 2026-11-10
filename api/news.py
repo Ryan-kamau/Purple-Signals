@@ -174,7 +174,7 @@ def get_latest_news(
         "Secondary sort is published_at DESC."
     ),
 )
-def get_high_impact_news(
+def fetch_high_impact_news(
     limit: int = Query(
         default=50,
         ge=1,

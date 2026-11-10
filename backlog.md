@@ -29,3 +29,5 @@ headliines to be converted to text instead of string
 in daily_features tabe remove target comlumns and add eps and pe ratios
 
 log better the errors fromall schedulers
+
+in news.py api add date range in  get_high_impact_news()

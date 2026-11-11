@@ -310,6 +310,68 @@ NSE_COMPANIES: dict[str, CompanyConfig] = {
 }
 
 
+
+# Central company-name aliases used by ALL article/company matching.
+# Ticker symbols are matched separately, case-sensitively.
+# Avoid generic terms such as "equity", "port", "scan", "arm" and "bat".
+NSE_COMPANY_ALIASES: dict[str, tuple[str, ...]] = {
+    "SCOM": ("safaricom",),
+    "EQTY": ("equity group", "equity group holdings", "equity bank"),
+    "KCB": ("kcb group", "kenya commercial bank"),
+    "EABL": ("east african breweries",),
+    "COOP": ("co-op bank", "co-operative bank", "cooperative bank", "coop bank"),
+    "ABSA": ("absa bank", "absa bank kenya", "absa kenya"),
+    "KPC": ("kenya pipeline", "kenya pipeline company"),
+    "IMH": ("i&m", "i&m group", "i&m holdings", "i&m bank"),
+    "NCBA": ("ncba group", "ncba bank"),
+    "SCBK": ("standard chartered", "standard chartered kenya", "stanchart"),
+    "SBIC": ("stanbic", "stanbic holdings", "stanbic bank kenya"),
+    "KEGN": ("kengen", "kenya electricity generating company"),
+    "KPLC": ("kenya power", "kenya power and lighting", "kenya power & lighting"),
+    "BAT": ("bat kenya", "british american tobacco"),
+    "KQ": ("kenya airways",),
+    "BAMB": ("bamburi", "bamburi cement"),
+    "DTK": ("diamond trust bank", "dtb", "dtb kenya"),
+    "HFCK": ("hf group", "housing finance", "housing finance group"),
+    "CGEN": ("car and general", "car & general"),
+    "NMG": ("nation media group", "nation media"),
+    "SASN": ("sasini",), "KUKZ": ("kakuzi",),
+    "KAPC": ("kapchorua", "kapchorua tea"),
+    "LIMT": ("limuru tea",), "WTK": ("williamson tea",),
+    "EGAD": ("eaagads",), "UNGA": ("unga group",),
+    "CARB": ("carbacid",), "BOC": ("boc kenya",),
+    "EVRD": ("eveready",), "CIC": ("cic insurance", "cic group"),
+    "BRIT": ("britam",), "JUB": ("jubilee holdings", "jubilee"),
+    "KNRE": ("kenya re", "kenya reinsurance"),
+    "LBTY": ("liberty kenya", "liberty life kenya"),
+    "CTUM": ("centum", "centum investment"),
+    "OCH": ("olympia capital",), "XPRS": ("express kenya",),
+    "FTGH": ("flame tree", "flame tree group"),
+    "HAFR": ("home africa", "home afrika"),
+    "AMAC": ("africa mega agricorp", "african mega agricorp"),
+    "BKG": ("bk group",), "CRWN": ("crown paints",),
+    "PORT": ("e.a. portland cement", "ea portland cement", "east african portland cement"),
+    "NBV": ("nairobi business ventures",),
+    "SLAM": ("sanlam kenya",),
+    "SKL": ("shri krishana overseas",),
+    "SGL": ("standard group",),
+    "TOTL": ("totalenergies marketing kenya", "total energies marketing kenya"),
+    "UCHM": ("uchumi supermarket", "uchumi",),
+    "UMME": ("umeme",),
+    "SCAN": ("wpp scangroup", "scangroup", "wpp scan group"),
+}
+
+
+def get_company_aliases(ticker: str) -> tuple[str, ...]:
+    """Return canonical company name plus explicit safe aliases."""
+    key = ticker.strip().upper()
+    entry = NSE_COMPANIES.get(key)
+    if entry is None:
+        return ()
+    names = (entry["company"], *NSE_COMPANY_ALIASES.get(key, ()))
+    return tuple(dict.fromkeys(n for n in names if n and n.strip()))
+
+
 def get_company(ticker: str) -> Optional[CompanyConfig]:
     """Return the registry entry for ticker, case-insensitively."""
     if not ticker:

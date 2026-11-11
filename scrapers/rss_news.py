@@ -60,6 +60,7 @@ from intelligence.relevance_filter import RelevanceFilter
 
 
 from models.headline_data import Headline
+from models.article_security import ArticleSecurity
 from schemas.headline import IngestionResponse
 from sqlalchemy import select
 
@@ -754,6 +755,7 @@ class RSSNewsIngestor:
 
             # Sentiment placeholder — populated by sentiment engine in Phase 2
             "sentiment_score": None,
+            "matched_tickers": tuple(enriched_article.get("matched_tickers") or ()),
         }
 
     # ------------------------------------------------------------------
@@ -994,9 +996,19 @@ class RSSNewsIngestor:
             return 0, [], None
 
         try:
-            orm_objects = [Headline(**article) for article in articles]
+            orm_objects = []
+            ticker_groups = []
+            for article in articles:
+                data = dict(article)
+                ticker_groups.append(tuple(dict.fromkeys(data.pop("matched_tickers", ()))))
+                orm_objects.append(Headline(**data))
             self._session.add_all(orm_objects)
             self._session.flush()  # assigns IDs before commit
+            self._session.add_all([
+                ArticleSecurity(article_id=obj.id, ticker=ticker)
+                for obj, tickers in zip(orm_objects, ticker_groups)
+                for ticker in tickers
+            ])
 
             stored_ids = [
                 obj.id

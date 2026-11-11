@@ -3,6 +3,7 @@ from database.base import Base
 from models.market_data import MarketData
 from models.market_data import MarketData
 from models.headline_data import Headline
+from models.article_security import ArticleSecurity
 from models.fundamental_data import Fundamentals
 from models.alert_data import Alert
 from models.macro_data import MacroData

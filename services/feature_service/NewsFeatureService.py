@@ -77,6 +77,7 @@ from sqlalchemy.orm import Session
 
 from models.daily_market_features import DailyMarketFeatures
 from models.headline_data import Headline
+from models.article_security import ArticleSecurity
 from models.market_data import MarketData
 
 logger = logging.getLogger(__name__)
@@ -92,38 +93,9 @@ NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
 # via bisect against the real trading-date list).
 MARKET_CLOSE_HOUR_EAT: int = 15
 
-# Aliases shorter than this are rejected as mention-matching candidates —
-# guards against short tickers/fragments producing false-positive matches.
-MIN_ALIAS_LEN: int = 3
-
-# Extra lookback before the earliest targeted trading date, so a Saturday/
-# Sunday headline that rolls forward to Monday is still captured by the
-# bounded DB query.
+# Extra lookback for non-trading-day headline rollover.
 _LOOKBACK_DAYS: int = 4
-
 _ROUND_DP: int = 6
-
-_CORPORATE_SUFFIX_PATTERN = re.compile(
-    r"\b(PLC|Plc|Ltd\.?|Limited|Group|Holdings|Company|Co\.?|Bank)\b",
-    re.IGNORECASE,
-)
-
-# Manual escape hatch for aliases a plain corporate-suffix strip won't
-# produce (e.g. "Equity Group Holdings" -> "Equity", but press coverage
-# says "Equity Bank"). Plain data, not per-ticker application logic —
-# same spirit as a securities/company-alias table this project doesn't
-# have yet. Extend freely as new tickers are onboarded.
-ALIAS_OVERRIDES: dict[str, list[str]] = {
-    "KPLC": ["Kenya Power"],
-    "EQTY": [
-        "Equity Group",
-        "Equity Group Holdings",
-        "Equity Bank",
-    ],
-    "SCOM": ["Safaricom"],
-    "KCB": ["KCB Group"],
-    "COOP": ["Co-operative Bank", "Co-op Bank"],
-}
 
 # Market-wide topic buckets. Matched against the SAME `categories` /
 # `keywords_detected` columns KeywordEngine already populated at
@@ -199,7 +171,6 @@ class NewsFeatureService:
                 service never opens, closes, or creates its own session).
         """
         self.db = db
-        self._alias_cache: dict[str, list[str]] = {}
 
     # ==================================================================
     # PUBLIC API
@@ -267,6 +238,8 @@ class NewsFeatureService:
 
         needed_dates = {trading_date for _, trading_date in target_keys}
         day_pool = self._load_headline_buckets(trading_dates, needed_dates)
+        article_ids = {h.id for pool in day_pool.values() for h in pool}
+        matches_by_ticker = self._load_article_matches(article_ids)
         topic_values_by_date = {
             trading_date: self._aggregate_topics(pool) for trading_date, pool in day_pool.items()
         }
@@ -288,10 +261,9 @@ class NewsFeatureService:
                 continue
 
             try:
-                aliases = self._get_aliases(ticker)
                 pool = day_pool.get(trading_date, [])
                 values = {
-                    **self._aggregate_ticker_day(pool, aliases),
+                    **self._aggregate_ticker_day(pool, matches_by_ticker.get(ticker, set())),
                     **topic_values_by_date.get(trading_date, self._empty_topic_values()),
                 }
             except Exception as exc:  # noqa: BLE001 — isolate per-row failures
@@ -481,17 +453,22 @@ class NewsFeatureService:
         return trading_dates[idx] if idx < len(trading_dates) else None
 
     # ==================================================================
-    # RELEVANCE + TOPIC MATCHING (pure — no DB, operate on loaded objects)
+    # RELEVANCE + TOPIC MATCHING (uses stored article associations)
     # ==================================================================
 
-    @staticmethod
-    def _is_mentioned(headline: Headline, aliases: list[str]) -> bool:
-        """Explicit-mention relevance: does any alias appear as a whole word in title/description?"""
-        text = f"{headline.headline or ''} {headline.description or ''}"
-        return any(
-            re.search(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE)
-            for alias in aliases
-        )
+    def _load_article_matches(self, article_ids: set[int]) -> dict[str, set[int]]:
+        """Fetch persisted associations for the headline pool in bounded batches."""
+        matches: dict[str, set[int]] = {}
+        ids = sorted(article_ids)
+        for start in range(0, len(ids), 500):
+            rows = self.db.execute(
+                select(ArticleSecurity.ticker, ArticleSecurity.article_id)
+                .where(ArticleSecurity.article_id.in_(ids[start:start + 500]))
+            ).all()
+            for ticker, article_id in rows:
+                matches.setdefault(ticker, set()).add(article_id)
+        return matches
+
 
     @staticmethod
     def _matches_topic(headline: Headline, topic_spec: dict[str, set[str]]) -> bool:
@@ -515,47 +492,12 @@ class NewsFeatureService:
     # ALIAS RESOLUTION
     # ==================================================================
 
-    def _get_aliases(self, ticker: str) -> list[str]:
-        """Cached per ticker per run — one MarketData lookup, not one per trading date."""
-        if ticker not in self._alias_cache:
-            company_name = self._fetch_latest_company_name(ticker)
-            self._alias_cache[ticker] = self._derive_aliases(ticker, company_name)
-        return self._alias_cache[ticker]
-
-    def _fetch_latest_company_name(self, ticker: str) -> Optional[str]:
-        return self.db.execute(
-            select(MarketData.company)
-            .where(MarketData.ticker == ticker)
-            .order_by(MarketData.timestamp.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-
-    @staticmethod
-    def _derive_aliases(ticker: str, company_name: Optional[str]) -> list[str]:
-        """
-        Build the alias list a headline is checked against for this ticker:
-        the ticker symbol itself, the full company name, a corporate-suffix-
-        stripped short form, and any manual ALIAS_OVERRIDES entries.
-        """
-        aliases = [ticker]
-
-        if company_name:
-            aliases.append(company_name)
-            stripped = _CORPORATE_SUFFIX_PATTERN.sub("", company_name).strip(" &,")
-            if stripped and stripped.lower() != company_name.lower():
-                aliases.append(stripped)
-
-        aliases.extend(ALIAS_OVERRIDES.get(ticker, []))
-
-        deduped = list(dict.fromkeys(aliases))
-        return [alias for alias in deduped if len(alias) >= MIN_ALIAS_LEN]
-
     # ==================================================================
     # AGGREGATION
     # ==================================================================
 
     def _aggregate_ticker_day(
-        self, pool: list[Headline], aliases: list[str]
+        self, pool: list[Headline], matched_article_ids: set[int]
     ) -> dict[str, Any]:
         """
         Compute the six per-(ticker, trading_date) fields from that day's
@@ -563,7 +505,7 @@ class NewsFeatureService:
         fabricated default — except relevant_headline_count, which is a
         genuine non-nullable count (0 is a valid, meaningful answer).
         """
-        mentioned = [h for h in pool if self._is_mentioned(h, aliases)]
+        mentioned = [h for h in pool if h.id in matched_article_ids]
         scored_mentioned = [h for h in mentioned if h.sentiment_score is not None]
 
         relevant_count = len(mentioned)

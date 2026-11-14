@@ -10,6 +10,7 @@ import time
 
 from database.session import SessionLocal
 from intelligence.sentiment_analyzer import SentimentAnalyzer
+from services.feature_service.NewsFeatureService import NewsFeatureService
 from services.feature_service import NewsFeatureService
 
 logging.basicConfig(
@@ -45,7 +46,6 @@ def main() -> int:
                 stats["execution_time"],
             )
 
-            from services.feature_service.NewsFeatureService import NewsFeatureService
 
             # replace: if stats["failed"] == 0: return 0
             if stats["failed"] == 0:

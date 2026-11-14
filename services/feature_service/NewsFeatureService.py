@@ -1,4 +1,3 @@
-
 """
 services/feature_service/news_feature_service.py
 
@@ -73,7 +72,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from models.daily_market_features import DailyMarketFeatures
 from models.headline_data import Headline
@@ -182,6 +181,22 @@ class NewsFeatureService:
         logger.info("process_all: %d ticker(s) with existing feature rows", len(tickers))
         return self._run({ticker: None for ticker in tickers})
 
+    def process_recent(self, sessions: int = 30) -> dict[str, Any]:
+        """Update news features for the latest N existing sessions per ticker."""
+        if sessions < 1:
+            return self._build_failure_result(0, 0, "sessions must be >= 1")
+        specs: dict[str, TargetSpec] = {}
+        for ticker in self._get_tickers_with_feature_rows():
+            dates = self.db.execute(
+                select(DailyMarketFeatures.trading_date)
+                .where(DailyMarketFeatures.ticker == ticker)
+                .order_by(DailyMarketFeatures.trading_date.desc())
+                .limit(sessions)
+            ).scalars().all()
+            if dates:
+                specs[ticker] = set(dates)
+        return self._run(specs)
+
     def process_ticker(self, ticker: str) -> dict[str, Any]:
         """Update every existing daily_market_features row for a single ticker."""
         return self._run({ticker: None})
@@ -227,16 +242,19 @@ class NewsFeatureService:
         if not ticker_specs:
             return self._build_result(0, UpdateOutcome())
 
-        trading_dates = self._get_trading_dates()
-        if not trading_dates:
-            logger.warning("No trading dates found in market_data — nothing to process.")
-            return self._build_result(len(ticker_specs), UpdateOutcome())
-
         target_keys = self._resolve_target_keys(ticker_specs)
         if not target_keys:
             return self._build_result(len(ticker_specs), UpdateOutcome())
 
         needed_dates = {trading_date for _, trading_date in target_keys}
+        trading_dates = self._get_trading_dates(
+            start_date=min(needed_dates) - timedelta(days=_LOOKBACK_DAYS),
+            end_date=max(needed_dates),
+        )
+        if not trading_dates:
+            logger.warning("No trading dates found in market_data — nothing to process.")
+            return self._build_result(len(ticker_specs), UpdateOutcome())
+
         day_pool = self._load_headline_buckets(trading_dates, needed_dates)
         article_ids = {h.id for pool in day_pool.values() for h in pool}
         matches_by_ticker = self._load_article_matches(article_ids)
@@ -377,13 +395,19 @@ class NewsFeatureService:
         ).scalars().all()
         return sorted(set(rows))
 
-    def _get_trading_dates(self) -> list[date]:
+    def _get_trading_dates(self, start_date: Optional[date] = None,
+                           end_date: Optional[date] = None) -> list[date]:
         """Return every trading date in market_data, sorted ascending."""
         #this is used cause the db stores time in nairobi timezoneno need to convert
+        stmt = select(func.date(MarketData.timestamp)).distinct()
+        if start_date is not None:
+            start = datetime.combine(start_date, time.min, tzinfo=NAIROBI_TZ)
+            stmt = stmt.where(MarketData.timestamp >= start)
+        if end_date is not None:
+            end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=NAIROBI_TZ)
+            stmt = stmt.where(MarketData.timestamp < end)
         trading_dates = self.db.execute(
-            select(func.date(MarketData.timestamp))
-            .distinct()
-            .order_by(func.date(MarketData.timestamp))
+            stmt.order_by(func.date(MarketData.timestamp))
         ).scalars().all()
         return sorted(set(trading_dates))
 
@@ -412,7 +436,11 @@ class NewsFeatureService:
         effective_ts = func.coalesce(Headline.published_at, Headline.timestamp)
 
         headlines = self.db.execute(
-            select(Headline).where(effective_ts >= start, effective_ts <= end)
+            select(Headline).options(load_only(
+                Headline.id, Headline.published_at, Headline.timestamp,
+                Headline.sentiment_score, Headline.impact_score,
+                Headline.categories, Headline.keywords_detected,
+            )).where(effective_ts >= start, effective_ts <= end)
         ).scalars().all()
 
         buckets: dict[date, list[Headline]] = {trading_date: [] for trading_date in needed_dates}

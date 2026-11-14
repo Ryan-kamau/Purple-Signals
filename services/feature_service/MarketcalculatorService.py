@@ -56,26 +56,9 @@ Architectural note — "trading calendar":
     needs to change.
 
 Architectural note — rolling-window history source:
-    Section 16 of the spec asks that once `daily_market_features` already
-    has historical rows, they be reused instead of recomputing everything
-    from `market_data` every run. A stored SMA/return cannot be
-    decomposed back into the individual raw closes it was built from, so
-    "reusing" computed aggregates to derive a *different* window is not
-    mathematically possible without re-deriving from raw prices anyway.
-    The practical, correct middle ground implemented here is:
-      1. Only ever query `market_data` filtered by a single `ticker`
-         (never the whole table), so per-run I/O stays bounded by that
-         ticker's own history — not by unrelated tickers.
-      2. A `daily_market_features` row that has already exhausted its
-         3-update lifetime limit is skipped without recomputation once
-         detected, which is the meaningful "don't redo settled work"
-         optimization for this service's actual lifecycle.
-    A finer-grained "only fetch the last 20 raw rows near the target
-    date" optimization is possible but adds real complexity (variable
-    lookback windows, edge cases at series boundaries) for a benefit that
-    doesn't matter at current/expected NSE data volumes (a few hundred to
-    low thousands of rows per ticker). Treat this as a tracked future
-    optimization, not a correctness gap.
+    process_recent() reads only the latest requested sessions plus the
+    historical context needed for the longest rolling calculation.
+    process_all() still reads and recomputes the complete available history.
 """
 
 from __future__ import annotations
@@ -87,7 +70,7 @@ from datetime import date, datetime, time
 from typing import Any, Optional, Union
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -205,6 +188,32 @@ class MarketCalculatorService:
         logger.info("process_all: %d ticker(s) found", len(tickers))
         return self._run({ticker: None for ticker in tickers})
 
+    def process_recent(self, sessions: int = 30) -> dict[str, Any]:
+        """Recompute the last N observed sessions per ticker, with bounded history.
+
+        Also refresh the immediately preceding session's next-day ML target.
+        Full-history backfills remain available through process_all().
+        """
+        if sessions < 1:
+            return self._build_failure_result(0, 0, [], "sessions must be >= 1")
+        tickers = self._get_all_tickers()
+        specs: dict[str, TargetSpec] = {}
+        for ticker in tickers:
+            dates = self._recent_trading_dates(ticker, sessions + 1)
+            if dates:
+                specs[ticker] = set(dates)
+        return self._run(specs, bounded=True)
+
+    def _recent_trading_dates(self, ticker: str, count: int) -> list[date]:
+        dates = self.db.execute(
+            select(func.date(MarketData.timestamp))
+            .where(MarketData.ticker == ticker)
+            .distinct()
+            .order_by(func.date(MarketData.timestamp).desc())
+            .limit(count)
+        ).scalars().all()
+        return sorted(set(dates))
+
     def process_ticker(self, ticker: str) -> dict[str, Any]:
         """Process a single ticker's full available trading history."""
         return self._run({ticker: None})
@@ -247,7 +256,7 @@ class MarketCalculatorService:
     # ORCHESTRATION
     # ==================================================================
 
-    def _run(self, ticker_specs: dict[str, TargetSpec]) -> dict[str, Any]:
+    def _run(self, ticker_specs: dict[str, TargetSpec], bounded: bool = False) -> dict[str, Any]:
         """
         Compute candidates for every requested ticker, then persist the
         entire batch in exactly one transaction.
@@ -263,7 +272,7 @@ class MarketCalculatorService:
 
         for ticker, spec in ticker_specs.items():
             tickers_processed += 1
-            candidates, errors = self._process_ticker(ticker, spec)
+            candidates, errors = self._process_ticker(ticker, spec, bounded=bounded)
             all_candidates.extend(candidates)
             all_errors.extend(errors)
 
@@ -286,7 +295,7 @@ class MarketCalculatorService:
     # ==================================================================
 
     def _process_ticker(
-        self, ticker: str, spec: TargetSpec
+        self, ticker: str, spec: TargetSpec, bounded: bool = False
     ) -> tuple[list[FeatureCandidate], list[dict[str, Any]]]:
         """
         Build feature candidates for one ticker's targeted trading dates.
@@ -300,7 +309,13 @@ class MarketCalculatorService:
         candidates: list[FeatureCandidate] = []
         errors: list[dict[str, Any]] = []
 
-        series = self._load_daily_series(ticker)
+        if bounded and isinstance(spec, set) and spec:
+            # 20 earlier observations support all rolling formulas; the
+            # target set includes one extra prior session for its ML label.
+            history_dates = self._recent_dates_through(ticker, min(spec), 20)
+            series = self._load_daily_series(ticker, start_date=history_dates[0] if history_dates else min(spec))
+        else:
+            series = self._load_daily_series(ticker)
         if not series:
             logger.warning("No market data found for ticker=%s", ticker)
             return candidates, errors
@@ -345,7 +360,17 @@ class MarketCalculatorService:
 
         return candidates, errors
 
-    def _load_daily_series(self, ticker: str) -> list[DailyObservation]:
+    def _recent_dates_through(self, ticker: str, before: date, count: int) -> list[date]:
+        rows = self.db.execute(
+            select(func.date(MarketData.timestamp))
+            .where(MarketData.ticker == ticker, func.date(MarketData.timestamp) < before)
+            .distinct()
+            .order_by(func.date(MarketData.timestamp).desc())
+            .limit(count)
+        ).scalars().all()
+        return sorted(set(rows))
+
+    def _load_daily_series(self, ticker: str, start_date: Optional[date] = None) -> list[DailyObservation]:
         """
         Load and collapse this ticker's entire raw history into one
         chronologically ordered observation per trading day.
@@ -356,16 +381,16 @@ class MarketCalculatorService:
         for a given trading day, the LAST row seen naturally wins —
         which is exactly the "latest intraday record" rule from the spec.
         """
-        rows = self.db.execute(
-            select(
+        stmt = select(
                 MarketData.price,
                 MarketData.volume,
                 MarketData.volatility,
                 MarketData.timestamp,
-            )
-            .where(MarketData.ticker == ticker)
-            .order_by(MarketData.timestamp.asc())
-        ).all()
+        ).where(MarketData.ticker == ticker)
+        if start_date is not None:
+            start, _ = self._nairobi_day_bounds(start_date)
+            stmt = stmt.where(MarketData.timestamp >= start)
+        rows = self.db.execute(stmt.order_by(MarketData.timestamp.asc())).all()
 
         by_date: dict[date, DailyObservation] = {}
         for price, volume, volatility, timestamp in rows:

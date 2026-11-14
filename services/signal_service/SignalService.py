@@ -89,6 +89,25 @@ class SignalService:
         result["registry_coverage"] = self._registry_coverage(set(tickers))
         return result
 
+    def process_recent(self, sessions: int = 30) -> dict[str, Any]:
+        """Evaluate the latest N feature sessions per ticker, using 20 prior volumes."""
+        if sessions < 1:
+            return self._failure(0, 0, "sessions must be >= 1")
+        tickers = self._tickers_with_features()
+        specs: dict[str, TargetSpec] = {}
+        for ticker in tickers:
+            dates = self.db.execute(
+                select(DailyMarketFeatures.trading_date)
+                .where(DailyMarketFeatures.ticker == ticker)
+                .order_by(DailyMarketFeatures.trading_date.desc())
+                .limit(sessions)
+            ).scalars().all()
+            if dates:
+                specs[ticker] = set(dates)
+        result = self._run(specs)
+        result["registry_coverage"] = self._registry_coverage(set(tickers))
+        return result
+
     def process_ticker(self, ticker: str) -> dict[str, Any]:
         return self._run({(ticker or "").strip().upper(): None})
 
@@ -189,18 +208,39 @@ class SignalService:
     def _evaluate_ticker(
         self, ticker: str, spec: TargetSpec
     ) -> tuple[list[_Candidate], list[dict[str, Any]], int]:
-        rows = self.db.execute(
-            select(
+        # For a bounded target, fetch only the target dates and the preceding
+        # VOLUME_LOOKBACK observations. The full-history path is unchanged.
+        earliest = None
+        if isinstance(spec, set) and spec:
+            earliest = min(spec)
+        elif isinstance(spec, tuple):
+            earliest = spec[0]
+        context_start = None
+        if earliest is not None:
+            context_dates = self.db.execute(
+                select(DailyMarketFeatures.trading_date)
+                .where(DailyMarketFeatures.ticker == ticker,
+                       DailyMarketFeatures.trading_date < earliest)
+                .order_by(DailyMarketFeatures.trading_date.desc())
+                .limit(VOLUME_LOOKBACK)
+            ).scalars().all()
+            context_start = min(context_dates) if context_dates else earliest
+
+        stmt = select(
                 DailyMarketFeatures.trading_date,
                 DailyMarketFeatures.daily_return,
                 DailyMarketFeatures.volume,
                 DailyMarketFeatures.weighted_sentiment,
                 DailyMarketFeatures.average_sentiment,
                 DailyMarketFeatures.relevant_headline_count,
-            )
-            .where(DailyMarketFeatures.ticker == ticker)
-            .order_by(DailyMarketFeatures.trading_date.asc())
-        ).all()
+        ).where(DailyMarketFeatures.ticker == ticker)
+        if context_start is not None:
+            stmt = stmt.where(DailyMarketFeatures.trading_date >= context_start)
+        if isinstance(spec, tuple):
+            stmt = stmt.where(DailyMarketFeatures.trading_date <= spec[1])
+        elif isinstance(spec, set) and spec:
+            stmt = stmt.where(DailyMarketFeatures.trading_date <= max(spec))
+        rows = self.db.execute(stmt.order_by(DailyMarketFeatures.trading_date.asc())).all()
 
         candidates: list[_Candidate] = []
         errors: list[dict[str, Any]] = []

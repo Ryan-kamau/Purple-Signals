@@ -1,3 +1,4 @@
+
 """
 Sentiment scheduler: scores every headline where sentiment_score IS NULL.
 Triggered by Windows Task Scheduler via scripts/run_sentiment.bat.
@@ -11,7 +12,6 @@ import time
 from database.session import SessionLocal
 from intelligence.sentiment_analyzer import SentimentAnalyzer
 from services.feature_service.NewsFeatureService import NewsFeatureService
-from services.feature_service import NewsFeatureService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +49,7 @@ def main() -> int:
 
             # replace: if stats["failed"] == 0: return 0
             if stats["failed"] == 0:
-                result = NewsFeatureService(db).process_all()
+                result = NewsFeatureService(db).process_recent(sessions=30)
                 logger.info(
                     "News features complete: status=%s updated=%d skipped=%d",
                     result["status"], result["rows_updated"], result["rows_skipped"],
@@ -86,3 +86,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

@@ -51,7 +51,7 @@ def generate_signals(db) -> None:
         RuntimeError: If the service reports a failed run.
     """
 
-    result = SignalService(db).process_all()
+    result = SignalService(db).process_recent(sessions=30)
 
     # Log structured results if the service returns a dictionary.
     if isinstance(result, dict):

@@ -1,3 +1,4 @@
+
 """
 Ingestion scheduler: market data refresh + RSS headline ingestion.
 Triggered by Windows Task Scheduler via scripts/run_ingestion.bat.
@@ -38,7 +39,7 @@ def ingest_rss(db) -> None:
     )
 
 def calculate_features(db) -> None:
-    result = MarketCalculatorService(db).process_all()
+    result = MarketCalculatorService(db).process_recent(sessions=30)
     logger.info(
         "Feature calculation complete: status=%s tickers=%d inserted=%d "
         "updated=%d skipped=%d",

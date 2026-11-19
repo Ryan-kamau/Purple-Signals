@@ -3,7 +3,7 @@ from typing import Optional
 
 from sqlalchemy import Date, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
-
+from core.timeutils import now_nairobi
 from database.base import Base
 
 
@@ -229,12 +229,12 @@ class DailyMarketFeatures(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow
+        default=now_nairobi
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow
+        default=now_nairobi(),
+        onupdate=now_nairobi()
     )

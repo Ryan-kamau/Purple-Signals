@@ -2,6 +2,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from database.base import Base
+from core.timeutils import now_nairobi
 
 from sqlalchemy import Column, Integer, String, DateTime, Numeric, Float, Double, UniqueConstraint
 
@@ -37,5 +38,5 @@ class Fundamentals(Base):
     # Generate a fresh timestamp for each new object
     timestamp = Column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(ZoneInfo("Africa/Nairobi"))
+        default=lambda: now_nairobi()
     )

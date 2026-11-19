@@ -43,6 +43,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from core.timeutils import to_nairobi_date
 from intelligence.alert_rules import (
     ALERT_TYPES,
     AlertDecision,
@@ -74,9 +75,6 @@ _ERROR_REASONS = {REASON_INVALID, REASON_ERROR}
 _CONF_TOL = 1e-9
 
 
-def _as_date(value: Any) -> date:
-    return value.date() if isinstance(value, datetime) else value
-
 
 def plan_action(decision: AlertDecision, active: Any) -> str:
     """
@@ -87,7 +85,7 @@ def plan_action(decision: AlertDecision, active: Any) -> str:
     if active is None:
         return ACTION_CREATE
 
-    active_date = _as_date(active.trading_date)
+    active_date = to_nairobi_date(active.trading_date)
     if decision.trading_date < active_date:
         return ACTION_OUTDATED
     if decision.alert_type != active.alert_type:
@@ -291,7 +289,7 @@ class AlertEvaluationService:
         ref = self.db.execute(select(func.max(DailyMarketFeatures.trading_date))).scalar_one_or_none()
         if ref is None:
             ref = self.db.execute(select(func.max(AnalysisResult.trading_date))).scalar_one_or_none()
-        return _as_date(ref) if ref is not None else None
+        return to_nairobi_date(ref) if ref is not None else None
 
     def _load_active_snapshots(self, tickers: list[str]) -> dict[str, _Snapshot]:
         if not tickers:

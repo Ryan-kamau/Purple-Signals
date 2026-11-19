@@ -67,6 +67,7 @@ import statistics
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from core.timeutils import as_nairobi, nairobi_day_bounds
 from typing import Any, Optional, Union
 from zoneinfo import ZoneInfo
 
@@ -401,10 +402,10 @@ class NewsFeatureService:
         #this is used cause the db stores time in nairobi timezoneno need to convert
         stmt = select(func.date(MarketData.timestamp)).distinct()
         if start_date is not None:
-            start = datetime.combine(start_date, time.min, tzinfo=NAIROBI_TZ)
+            start = nairobi_day_bounds(start_date)[0]
             stmt = stmt.where(MarketData.timestamp >= start)
         if end_date is not None:
-            end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=NAIROBI_TZ)
+            end = nairobi_day_bounds(end_date)[1]
             stmt = stmt.where(MarketData.timestamp < end)
         trading_dates = self.db.execute(
             stmt.order_by(func.date(MarketData.timestamp))
@@ -428,8 +429,8 @@ class NewsFeatureService:
 
         earliest = min(needed_dates) - timedelta(days=_LOOKBACK_DAYS)
         latest = max(needed_dates) + timedelta(days=1)
-        start = datetime.combine(earliest, time.min, tzinfo=NAIROBI_TZ)
-        end = datetime.combine(latest, time.max, tzinfo=NAIROBI_TZ)
+        start = nairobi_day_bounds(earliest)[0]
+        end = nairobi_day_bounds(latest)[1]
 
         # COALESCE so a null published_at (rare — falls back to ingestion
         # time) is bounded in the same query instead of a second round trip.
@@ -470,7 +471,7 @@ class NewsFeatureService:
         if ts is None:
             return None
 
-        local = ts.astimezone(NAIROBI_TZ) if ts.tzinfo else ts.replace(tzinfo=NAIROBI_TZ)
+        local = as_nairobi(ts)
         bucket_date = (
             local.date() + timedelta(days=1)
             if local.hour >= MARKET_CLOSE_HOUR_EAT
@@ -600,13 +601,7 @@ class NewsFeatureService:
     # ==================================================================
     # TIMEZONE HELPERS
     # ==================================================================
-
-    @staticmethod
-    def _to_nairobi_date(timestamp: datetime) -> date:
-        if timestamp.tzinfo is None:
-            # Project convention: naive timestamps are already Nairobi-local.
-            return timestamp.date()
-        return timestamp.astimezone(NAIROBI_TZ).date()
+    #imported from timeutils
 
     # ==================================================================
     # RESPONSE BUILDERS

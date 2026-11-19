@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from database.base import Base
 from sqlalchemy import UniqueConstraint
-
+from core.timeutils import now_nairobi
 class MarketData(Base):
     __tablename__ = "market_data"
     __table_args__ = (
@@ -34,5 +34,4 @@ class MarketData(Base):
     volatility = Column(Float)
 
 
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(
-        ZoneInfo("Africa/Nairobi")))
+    timestamp = Column(DateTime(timezone=True), default=lambda: now_nairobi())

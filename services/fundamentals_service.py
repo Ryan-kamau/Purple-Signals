@@ -46,6 +46,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from config.nse_companies import get_company
+from core.timeutils import to_nairobi_date
 from models.fundamental_data import Fundamentals
 from models.market_data import MarketData
 from scrapers.fundamentals_csv import (
@@ -572,14 +573,12 @@ class FundamentalsService:
 
         lookup: dict[tuple[str, date], Fundamentals] = {}
         for row in rows:
-            key = (row.ticker, self._as_date(row.report_date))
+            key = (row.ticker, to_nairobi_date(row.report_date))
             if key in wanted:
                 lookup[key] = row
         return lookup
 
-    @staticmethod
-    def _as_date(value: Any) -> date:
-        return value.date() if isinstance(value, datetime) else value
+    
 
     # ==================================================================
     # PRIVATE — serialisation / response builders

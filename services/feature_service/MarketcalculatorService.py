@@ -76,7 +76,7 @@ from sqlalchemy.orm import Session
 
 from models.daily_market_features import DailyMarketFeatures
 from models.market_data import MarketData
-from core.timeutils import to_nairobi_date
+from core.timeutils import to_nairobi_date, nairobi_day_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -389,7 +389,7 @@ class MarketCalculatorService:
                 MarketData.timestamp,
         ).where(MarketData.ticker == ticker)
         if start_date is not None:
-            start, _ = self._nairobi_day_bounds(start_date)
+            start, _ = nairobi_day_bounds(start_date)
             stmt = stmt.where(MarketData.timestamp >= start)
         rows = self.db.execute(stmt.order_by(MarketData.timestamp.asc())).all()
 
@@ -676,14 +676,8 @@ class MarketCalculatorService:
     # ==================================================================
     # TIMEZONE HELPERS
     # ==================================================================
-    
+    #imported as functions from core.timeutils.py
 
-    @staticmethod
-    def _nairobi_day_bounds(target_date: date) -> tuple[datetime, datetime]:
-        """[start, end) datetime bounds for one Nairobi calendar day."""
-        start = datetime.combine(target_date, time.min, tzinfo=NAIROBI_TZ)
-        end = datetime.combine(target_date, time.max, tzinfo=NAIROBI_TZ)
-        return start, end
 
     # ==================================================================
     # RESPONSE BUILDERS

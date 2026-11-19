@@ -12,6 +12,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from database.base import Base
+from core.timeutils import now_nairobi
 
 
 class Headline(Base):
@@ -31,9 +32,7 @@ class Headline(Base):
 
     published_at = Column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(
-            ZoneInfo("Africa/Nairobi")
-        )
+        default=lambda: now_nairobi()
     )
 
 
@@ -60,7 +59,5 @@ class Headline(Base):
     
     timestamp = Column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(
-            ZoneInfo("Africa/Nairobi")
-        )
+        default=lambda: now_nairobi()
     )

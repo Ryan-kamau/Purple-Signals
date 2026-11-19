@@ -15,6 +15,7 @@ from sqlalchemy import (
 )
 
 from database.base import Base
+from core.timeutils import now_nairobi
 
 
 class AnalysisResult(Base):
@@ -50,5 +51,5 @@ class AnalysisResult(Base):
     # Evaluated per row (lambda); the old default ran once at import time.
     timestamp = Column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(ZoneInfo("Africa/Nairobi")),
+        default=lambda: now_nairobi(),
     )

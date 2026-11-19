@@ -4,6 +4,7 @@ from sqlalchemy import Column, Integer, Float, String, Date
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from core.timeutils import now_nairobi
 from database.base import Base
 
 
@@ -13,7 +14,7 @@ class MacroData(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     report_date = Column(Date, default=
-                         datetime.now(ZoneInfo("Africa/Nairobi")))
+                         lambda: now_nairobi().date())
 
     inflation = Column(Float)
 
@@ -36,4 +37,4 @@ class MacroData(Base):
     inflation_trend = Column(Float)
 
     timestamp = Column(Date, 
-                       default=lambda: datetime.now(ZoneInfo("Africa/Nairobi")))
+                       default=lambda: now_nairobi().date())

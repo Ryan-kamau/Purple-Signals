@@ -42,7 +42,6 @@ import logging
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, inspect as sa_inspect, select, tuple_, union
 from sqlalchemy.orm import Session
@@ -54,6 +53,8 @@ from models.daily_market_features import DailyMarketFeatures as Features
 from models.fundamental_data import Fundamentals
 from models.macro_data import MacroData
 from models.market_data import MarketData
+from core.periods import MONTH_NAMES, period_key
+from core.timeutils import now_nairobi, to_nairobi_date
 from schemas.analysis import (
     AlertItem,
     AnalysisResponse,
@@ -75,13 +76,6 @@ from schemas.analysis import (
 )
 
 logger = logging.getLogger(__name__)
-
-NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
-
-MONTH_ORDER: list[str] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
 
 # response field -> (MacroData value column, MacroData trend column | None)
 MACRO_INDICATORS: dict[str, tuple[str, Optional[str]]] = {
@@ -133,7 +127,7 @@ class MasterIntelligenceService:
             ValueError:          invalid pagination (NSE-wide mode only).
             sqlalchemy errors:   propagate - never turned into an empty 200.
         """
-        now = self._now or datetime.now(NAIROBI_TZ)
+        now = self._now or now_nairobi()
         reference_date = now.date()
 
         universe = self._universe_subquery()
@@ -341,7 +335,7 @@ class MasterIntelligenceService:
                 or self._clean(getattr(fundamental, "company", None))
             )
 
-            fundamental_date = self._as_date(fundamental.report_date) if fundamental else None
+            fundamental_date = to_nairobi_date(fundamental.report_date) if fundamental else None
 
             result.append(
                 SecurityIntelligence(
@@ -511,7 +505,7 @@ class MasterIntelligenceService:
 
         keyed: list[tuple[tuple[int, int, int], Any]] = []
         for row in rows:
-            period = self._period_key(row.month, row.year)
+            period = period_key(row.month, row.year)
             if period is not None:
                 keyed.append(((period[0], period[1], row.id or 0), row))
         keyed.sort(key=lambda item: item[0], reverse=True)
@@ -537,26 +531,14 @@ class MasterIntelligenceService:
             month = month_index + 1
             return MacroIndicator(
                 value=float(value),
-                period=f"{MONTH_ORDER[month_index]} {year}",
+                period=f"{MONTH_NAMES[month_index]} {year}",
                 as_of=date(year, month, 1),
-                report_date=self._as_date(row.report_date),
+                report_date=to_nairobi_date(row.report_date),
                 trend=self._num(getattr(row, trend_column)) if trend_column else None,
                 is_available=True,
                 is_stale=cfg.is_macro_stale(year, month, reference_date),
             )
         return MacroIndicator(is_available=False)
-
-    @staticmethod
-    def _period_key(month: Optional[str], year: Optional[str]) -> Optional[tuple[int, int]]:
-        if not month or not year:
-            return None
-        name = str(month).strip().capitalize()
-        if name not in MONTH_ORDER:
-            return None
-        try:
-            return int(str(year).strip()), MONTH_ORDER.index(name)
-        except ValueError:
-            return None
 
     # ==================================================================
     # SMALL HELPERS
@@ -573,16 +555,6 @@ class MasterIntelligenceService:
             return None
         text = str(value).strip()
         return text or None
-
-    @staticmethod
-    def _as_date(value: Any) -> Optional[date]:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            if value.tzinfo is not None:
-                value = value.astimezone(NAIROBI_TZ)
-            return value.date()
-        return value
 
     @staticmethod
     def _plain(value: Any) -> Any:

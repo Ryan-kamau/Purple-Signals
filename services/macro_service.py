@@ -51,29 +51,17 @@ No FastAPI routes, no HTTP concerns, no PDF/table parsing live here.
 """
 
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
-from models.macro_data import MacroData
+from core.periods import MONTH_NAMES, normalize_month
+from core.timeutils import NAIROBI_TZ
+from services.macro_repository import MacroRepository, PersistStats, serialize_macro
 from scrapers.macro_scraper import KNBSExtractor
 
 logger = logging.getLogger(__name__)
-
-NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
-
-# Canonical month ordering — used to walk backwards to the "previous month"
-# for trend calculations without depending on report_date. Isolated here
-# so month/year-specific logic doesn't leak into persistence or response
-# building; a future non-monthly dataset would only need its own key
-# resolver, not a rewrite of the pipeline.
-MONTH_ORDER: list[str] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
 
 # Single source of truth for "extractor field -> MacroData column".
 # The registry below only references this; nothing else in the service
@@ -92,39 +80,6 @@ FIELD_MAPS: dict[str, dict[str, str]] = {
 # Structural keys every extractor response must carry, regardless of
 # whether extraction itself succeeded.
 _REQUIRED_RESPONSE_KEYS = ("table_name", "report_date", "status", "source_url", "data")
-
-
-# ---------------------------------------------------------------------------
-# Persistence result container
-# ---------------------------------------------------------------------------
-
-@dataclass
-class PersistStats:
-    """
-    Classifies every MacroData row processed by `_persist_records()` into
-    exactly one of three buckets, so callers can report accurate save
-    counts (`rows_saved = inserted + updated`) and skip trend
-    recomputation for rows that didn't actually change.
-
-    A row is:
-      - inserted:  a brand-new MacroData object was created.
-      - updated:   the row already existed and at least one column changed.
-      - unchanged: the row already existed and nothing changed.
-    """
-
-    inserted: list[MacroData] = field(default_factory=list)
-    updated: list[MacroData] = field(default_factory=list)
-    unchanged: list[MacroData] = field(default_factory=list)
-
-    @property
-    def records(self) -> list[MacroData]:
-        """Every row processed, regardless of whether it changed."""
-        return self.inserted + self.updated + self.unchanged
-
-    @property
-    def changed_records(self) -> list[MacroData]:
-        """Only rows that were actually inserted or updated."""
-        return self.inserted + self.updated
 
 
 class MacroService:
@@ -155,6 +110,7 @@ class MacroService:
             extractor: Optional KNBSExtractor override (useful for testing / DI).
         """
         self._db = db
+        self._repo = MacroRepository(db)
         self._extractor = extractor or KNBSExtractor()
         self._registry = self._build_registry()
 
@@ -400,10 +356,10 @@ class MacroService:
 
     def _normalize_record(self, raw_record: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Clean month/year into the base of a normalized record."""
-        month = self._normalize_month(raw_record.get("month"))
+        month = normalize_month(raw_record.get("month"))
         year = self._normalize_year(raw_record.get("year"))
 
-        if not month or month not in MONTH_ORDER:
+        if not month or month not in MONTH_NAMES:
             return None
 
         return {"month": month, "year": year}
@@ -436,13 +392,6 @@ class MacroService:
             mapped[column_name] = self._normalize_numeric(raw_record.get(raw_field))
 
         return mapped
-
-    @staticmethod
-    def _normalize_month(value: Any) -> Optional[str]:
-        """Trim whitespace and normalise casing, e.g. 'MARCH' / 'march' -> 'March'."""
-        if not value:
-            return None
-        return str(value).strip().capitalize()
 
     @staticmethod
     def _normalize_year(value: Any) -> Optional[str]:
@@ -493,11 +442,11 @@ class MacroService:
         """
         parsed_report_date = self._parse_report_date(report_date)
 
-        stats = self._persist_records(records, parsed_report_date)
+        stats = self._repo.upsert(records, parsed_report_date)
 
         # Trends only matter for rows whose values actually changed —
         # unchanged rows already have whatever trend they had before.
-        self._apply_trends(stats.changed_records)
+        self._repo.apply_trends(stats.changed_records)
 
         self._db.commit()
 
@@ -506,129 +455,6 @@ class MacroService:
             len(stats.inserted), len(stats.updated), len(stats.unchanged),
         )
         return stats
-
-    def _persist_records(
-        self,
-        records: list[dict[str, Any]],
-        parsed_report_date: Optional[datetime],
-    ) -> PersistStats:
-        """
-        Upsert normalized records into MacroData, one row per (month, year).
-
-        Existing rows are fetched in a single batched query (keyed on the
-        exact (month, year) pairs being processed) rather than one query
-        per record, and every processed row is classified as inserted,
-        updated, or unchanged so callers can report accurate save counts.
-
-        Update rule unchanged: only overwrite a column when the new value
-        is not None — this is what lets refresh_inflation(),
-        refresh_fuel_prices(), etc. be called independently over time and
-        still converge to one fully populated row per (month, year).
-
-        No merge stage: the extractor already yields at most one record
-        per (month, year), so records are persisted directly.
-
-        Flushes (does not commit) so callers can layer additional
-        in-transaction work — e.g. trend computation — before the single
-        commit in `_persist_and_compute`.
-        """
-        stats = PersistStats()
-
-        if not records:
-            return stats
-
-        keys = [(record["month"], record["year"]) for record in records]
-        existing_lookup = self._fetch_existing_records(keys)
-
-        for record in records:
-            month = record["month"]
-            year = record["year"]
-            fields = {k: v for k, v in record.items() if k not in ("month", "year")}
-
-            existing: Optional[MacroData] = existing_lookup.get((month, year))
-
-            if existing:
-                changed = False
-
-                for column, value in fields.items():
-                    current_value = getattr(existing, column)
-
-                    # Never overwrite an existing non-null value.
-                    if current_value is not None:
-                        continue
-
-                    if value is not None:
-                        setattr(existing, column, value)
-                        changed = True
-
-                # Only set report_date if it hasn't been set already.
-                if existing.report_date is None and parsed_report_date is not None:
-                    existing.report_date = parsed_report_date
-                    changed = True
-
-                if changed:
-                    logger.debug("Updated %s %s", month, year)
-                    stats.updated.append(existing)
-                else:
-                    logger.debug("No missing values to fill for %s %s", month, year)
-                    stats.unchanged.append(existing)
-            else:
-                logger.debug("Inserting new record for %s %s", month, year)
-                new_record = MacroData(
-                    month=month,
-                    year=year,
-                    report_date=parsed_report_date,
-                    **fields,
-                )
-                self._db.add(new_record)
-                stats.inserted.append(new_record)
-
-        self._db.flush()
-
-        logger.info(
-            "Persistence summary: Inserted=%d Updated=%d Unchanged=%d",
-            len(stats.inserted), len(stats.updated), len(stats.unchanged),
-        )
-
-        return stats
-
-    def _fetch_existing_records(
-        self, keys: list[tuple[str, str]]
-    ) -> dict[tuple[str, str], MacroData]:
-        """
-        Batch-fetch every existing MacroData row for the given (month, year)
-        keys in a single query, instead of one query per record.
-
-        Mirrors the over-fetch-then-filter approach used in
-        `_fetch_previous_month_records`: queries by month-set x year-set
-        (portable across backends, since not every backend supports
-        multi-column IN-tuple filters cleanly) and then filters down to
-        the exact pairs requested.
-
-        Args:
-            keys: (month, year) pairs for every record about to be persisted.
-
-        Returns:
-            {(month, year): MacroData} for every key that already exists.
-        """
-        if not keys:
-            return {}
-
-        unique_keys = set(keys)
-        months = {month for month, _year in unique_keys}
-        years = {year for _month, year in unique_keys}
-
-        candidates = (
-            self._db.query(MacroData)
-            .filter(MacroData.month.in_(months), MacroData.year.in_(years))
-            .all()
-        )
-
-        return {
-            (candidate.month, candidate.year): candidate
-            for candidate in candidates
-            if (candidate.month, candidate.year) in unique_keys
-        }
 
     @staticmethod
     def _parse_report_date(report_date: Optional[str]) -> Optional[datetime]:
@@ -652,118 +478,6 @@ class MacroService:
     # ------------------------------------------------------------------
     # Derived analytics — batched to avoid N+1 queries
     # ------------------------------------------------------------------
-
-    def _apply_trends(self, records: list[MacroData]) -> None:
-        """
-        Compute inflation_trend and fuel_trend for each record in-memory,
-        using a single batched query for all required previous-month rows
-        instead of one query per record.
-
-        Only called with inserted/updated records — unchanged rows are
-        skipped by the caller since their values (and therefore their
-        trends) haven't moved.
-
-        trend = current_value - previous_value
-        If no previous month record exists (or the relevant value is
-        missing on either side), the trend is left as None.
-        """
-        if not records:
-            return
-
-        needed_keys: set[tuple[str, str]] = set()
-        for record in records:
-            key = self._previous_month_key(record.month, record.year)
-            if key is not None:
-                needed_keys.add(key)
-
-        previous_lookup = self._fetch_previous_month_records(needed_keys)
-
-        for record in records:
-            key = self._previous_month_key(record.month, record.year)
-            previous = previous_lookup.get(key) if key else None
-
-            if previous is None:
-                record.inflation_trend = None
-                record.fuel_trend = None
-                continue
-
-            record.inflation_trend = (
-                round(record.inflation - previous.inflation, 4)
-                if record.inflation is not None and previous.inflation is not None
-                else None
-            )
-            record.fuel_trend = (
-                round(record.fuel_price - previous.fuel_price, 4)
-                if record.fuel_price is not None and previous.fuel_price is not None
-                else None
-            )
-
-        logger.info("Computed inflation and fuel trends for %d record(s)", len(records))
-
-    @staticmethod
-    def _previous_month_key(month: str, year: str) -> Optional[tuple[str, str]]:
-        """
-        Resolve the (month, year) key immediately preceding (month, year),
-        walking December -> January across a year boundary.
-
-        Isolated as its own helper so the "monthly" assumption stays in
-        one place rather than spread across query logic.
-
-        Returns:
-            (previous_month, previous_year), or None if `month`/`year`
-            aren't recognisable.
-        """
-        if month not in MONTH_ORDER:
-            logger.debug("Unrecognised month '%s' — cannot resolve previous key.", month)
-            return None
-
-        try:
-            year_int = int(year)
-        except (TypeError, ValueError):
-            logger.debug("Unrecognised year '%s' — cannot resolve previous key.", year)
-            return None
-
-        index = MONTH_ORDER.index(month)
-
-        if index == 0:
-            return "December", str(year_int - 1)
-        return MONTH_ORDER[index - 1], str(year_int)
-
-    def _fetch_previous_month_records(
-        self, needed_keys: set[tuple[str, str]]
-    ) -> dict[tuple[str, str], MacroData]:
-        """
-        Batch-fetch every MacroData row needed for trend computation in a
-        single query, instead of one query per record.
-
-        Over-fetches slightly (queries by month-set x year-set rather than
-        exact pair-set, since exact tuple matching isn't portable across
-        all backends) and then filters down to exact (month, year) keys —
-        cheap in-memory work that avoids N+1 round trips to the DB.
-
-        Args:
-            needed_keys: Set of (month, year) pairs required for trends.
-
-        Returns:
-            {(month, year): MacroData} for every key that exists in the DB.
-        """
-        if not needed_keys:
-            return {}
-
-        months = {month for month, _year in needed_keys}
-        years = {year for _month, year in needed_keys}
-
-        candidates = (
-            self._db.query(MacroData)
-            .filter(MacroData.month.in_(months), MacroData.year.in_(years))
-            .all()
-        )
-
-        return {
-            (candidate.month, candidate.year): candidate
-            for candidate in candidates
-            if (candidate.month, candidate.year) in needed_keys
-        }
 
     # ------------------------------------------------------------------
     # Response builders — now consistent with extractor response shape
@@ -799,7 +513,7 @@ class MacroService:
             "report_date": report_date,
             "table_name": table_name,
             "source_url": source_url,
-            "data": [self._serialize(record) for record in stats.records],
+            "data": [serialize_macro(record) for record in stats.records],
         }
 
     @staticmethod
@@ -865,21 +579,3 @@ class MacroService:
             "results": results,
         }
 
-    @staticmethod
-    def _serialize(record: MacroData) -> dict[str, Any]:
-        """Convert a MacroData ORM object into a JSON-serialisable dict."""
-        return {
-            "id": record.id,
-            "month": record.month,
-            "year": record.year,
-            "report_date": record.report_date.isoformat() if record.report_date else None,
-            "inflation": record.inflation,
-            "inflation_trend": record.inflation_trend,
-            "fuel_price": record.fuel_price,
-            "fuel_trend": record.fuel_trend,
-            "cbk_rate": record.cbk_rate,
-            "usd_kes_rate": record.usd_kes_rate,
-            "euro_kes_rate": record.euro_kes_rate,
-            "pounds_kes_rate": record.pounds_kes_rate,
-            "timestamp": record.timestamp.isoformat() if record.timestamp else None,
-        }

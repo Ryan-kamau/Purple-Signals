@@ -39,26 +39,17 @@ instances ever cross the public API boundary.
 import logging
 from datetime import datetime, date
 from typing import Any, Callable, Optional
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import Column
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Query, Session
 from sqlalchemy import case, cast, Integer
 
+from core.periods import MONTH_NAMES, normalize_month, period_key
+from services.macro_repository import serialize_macro
 from models.macro_data import MacroData
 
 logger = logging.getLogger(__name__)
-
-NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
-
-# Canonical month ordering — mirrors MacroService.MONTH_ORDER. Used to walk
-# to adjacent months (e.g. get_last_n_months) without depending on
-# report_date, since report_date may be absent on hand-seeded rows.
-MONTH_ORDER: list[str] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
 
 # Default pagination — every collection-returning public method uses these
 # unless the caller overrides them.
@@ -153,7 +144,7 @@ class MacroQueryService:
 
         return self._success_response(
             message="Latest macro record retrieved successfully.",
-            data=[self._serialize(record)],
+            data=[serialize_macro(record)],
             total=1,
         )
 
@@ -183,9 +174,9 @@ class MacroQueryService:
             record. Returns a failure envelope only on a database error —
             an unmatched month/year is a valid empty result, not a failure.
         """
-        normalized_month = self._normalize_month(month)
+        normalized_month = normalize_month(month)
 
-        if normalized_month not in MONTH_ORDER:
+        if normalized_month not in MONTH_NAMES:
             return self._failure_response(
                 message=f"'{month}' is not a recognised month name."
             )
@@ -211,7 +202,7 @@ class MacroQueryService:
 
         return self._success_response(
             message=f"Macro record for {normalized_month} {year} retrieved successfully.",
-            data=[self._serialize(record)],
+            data=[serialize_macro(record)],
             total=1,
         )
 
@@ -246,7 +237,7 @@ class MacroQueryService:
 
         return self._success_response(
             message="Macro record retrieved successfully.",
-            data=[self._serialize(record)],
+            data=[serialize_macro(record)],
             total=1,
         )
 
@@ -303,7 +294,7 @@ class MacroQueryService:
 
         return self._success_response(
             message=f"Last {n} month(s) of macro data retrieved successfully.",
-            data=[self._serialize(r) for r in chronological],
+            data=[serialize_macro(r) for r in chronological],
             total=len(chronological),
             limit=n,
             offset=0,
@@ -350,7 +341,7 @@ class MacroQueryService:
                 total=0,
             )
 
-        return self.get_year(latest_record.year, limit=len(MONTH_ORDER), offset=0)
+        return self.get_year(latest_record.year, limit=len(MONTH_NAMES), offset=0)
 
     def get_history_between(
         self,
@@ -569,8 +560,8 @@ class MacroQueryService:
             )
 
         comparison = {
-            "period_a": self._serialize(record_a),
-            "period_b": self._serialize(record_b),
+            "period_a": serialize_macro(record_a),
+            "period_b": serialize_macro(record_b),
             "deltas": self._compute_deltas(record_a, record_b),
         }
 
@@ -750,8 +741,8 @@ class MacroQueryService:
         conditions: list[Any] = []
 
         if month is not None:
-            normalized_month = self._normalize_month(month)
-            if normalized_month not in MONTH_ORDER:
+            normalized_month = normalize_month(month)
+            if normalized_month not in MONTH_NAMES:
                 return self._failure_response(
                     message=f"'{month}' is not a recognised month name."
                 )
@@ -840,7 +831,7 @@ class MacroQueryService:
         month_order = case(
             {
                 month: index
-                for index, month in enumerate(MONTH_ORDER, start=1)
+                for index, month in enumerate(MONTH_NAMES, start=1)
             },
             value=MacroData.month,
             else_=0,
@@ -933,7 +924,7 @@ class MacroQueryService:
 
         return self._success_response(
             message=message,
-            data=[self._serialize(record) for record in records],
+            data=[serialize_macro(record) for record in records],
             total=total,
             limit=limit,
             offset=offset,
@@ -1041,9 +1032,9 @@ class MacroQueryService:
         Returns:
             MacroData ORM object, or None if not found or on DB error.
         """
-        normalized_month = self._normalize_month(month)
+        normalized_month = normalize_month(month)
 
-        if normalized_month not in MONTH_ORDER:
+        if normalized_month not in MONTH_NAMES:
             return None
 
         try:
@@ -1089,13 +1080,8 @@ class MacroQueryService:
 
     @staticmethod
     def _record_sort_key(record: MacroData) -> tuple[int, int, int]:
-        """Return chronological ordering by observation year and month."""
-        month = str(record.month or "").strip().capitalize()
-        return (
-            int(record.year) if record.year and str(record.year).isdigit() else 0,
-            MONTH_ORDER.index(month) + 1 if month in MONTH_ORDER else 0,
-            record.id or 0,
-        )
+        """Sort by observation period, then record ID."""
+        return (*(period_key(record.month, record.year) or (0, -1)), record.id or 0)
 
     def _build_summary(self, records: list[MacroData]) -> dict[str, Any]:
         """
@@ -1132,8 +1118,8 @@ class MacroQueryService:
 
         return {
             "total_observations": total_observations,
-            "earliest": self._serialize(earliest),
-            "latest": self._serialize(latest),
+            "earliest": serialize_macro(earliest),
+            "latest": serialize_macro(latest),
             "indicator_counts": indicator_counts,
         }
 
@@ -1288,14 +1274,6 @@ class MacroQueryService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _normalize_month(value: Any) -> Optional[str]:
-        """Trim whitespace and normalise casing, e.g. 'MARCH' -> 'March'."""
-        if not value:
-            return None
-        return str(value).strip().capitalize()
-
-    
-    @staticmethod
     def _normalize_date(value: date | datetime) -> date:
         """Convert datetime to date; leave date values unchanged."""
         if isinstance(value, datetime):
@@ -1303,57 +1281,9 @@ class MacroQueryService:
         return value
 
 
-    @staticmethod
-    def _ensure_timezone(value: datetime) -> datetime:
-        """
-        Ensure a datetime is timezone-aware, assuming Africa/Nairobi for
-        naive input. Mirrors the timezone convention used throughout the
-        project (MacroService, models).
-
-        Args:
-            value: Datetime to normalise.
-
-        Returns:
-            Timezone-aware datetime.
-        """
-        if value.tzinfo is None:
-            return value.replace(tzinfo=NAIROBI_TZ)
-        return value
-
     # ------------------------------------------------------------------
     # PRIVATE — serialization
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _serialize(record: MacroData) -> dict[str, Any]:
-        """
-        Convert a MacroData ORM object into a JSON-serialisable dict.
-
-        This is the ONLY place ORM attribute access happens for output
-        purposes — every public method returns the result of this method
-        (or a structure built from it), never a raw ORM object.
-
-        Args:
-            record: MacroData ORM instance.
-
-        Returns:
-            Dict with all MacroData fields, datetimes as ISO-8601 strings.
-        """
-        return {
-            "id": record.id,
-            "month": record.month,
-            "year": record.year,
-            "report_date": record.report_date.isoformat() if record.report_date else None,
-            "inflation": record.inflation,
-            "inflation_trend": record.inflation_trend,
-            "fuel_price": record.fuel_price,
-            "fuel_trend": record.fuel_trend,
-            "cbk_rate": record.cbk_rate,
-            "usd_kes_rate": record.usd_kes_rate,
-            "euro_kes_rate": record.euro_kes_rate,
-            "pounds_kes_rate": record.pounds_kes_rate,
-            "timestamp": record.timestamp.isoformat() if record.timestamp else None,
-        }
 
     # ------------------------------------------------------------------
     # PRIVATE — response builders

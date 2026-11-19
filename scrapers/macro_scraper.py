@@ -99,6 +99,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse, unquote
+from core.periods import MONTH_NAMES
 
 import pdfplumber
 import camelot
@@ -256,10 +257,7 @@ class PDFManager:
         # Strip extension, e.g. ".pdf"
         filename_no_ext = re.sub(r"\.pdf$", "", filename, flags=re.IGNORECASE)
 
-        month_pattern = (
-            r"(January|February|March|April|May|June|July|August|"
-            r"September|October|November|December)"
-        )
+        month_pattern = "(" + "|".join(MONTH_NAMES) + ")"
         year_pattern = r"(20\d{2})"
 
         match = re.search(
@@ -954,10 +952,7 @@ class BaseExtractor(ABC):
 # CBR records. No reusable pipeline logic is touched or duplicated here.
 # ---------------------------------------------------------------------------
 
-MONTH_NAMES_SET = {
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-}
+MONTH_NAMES_SET = frozenset(MONTH_NAMES)
 
 # Zero-based index, within a row's cleaned tokens, where the CBR value
 # is expected to live for KNBS "Interest rate" tables.

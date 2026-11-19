@@ -76,6 +76,7 @@ from sqlalchemy.orm import Session
 
 from models.daily_market_features import DailyMarketFeatures
 from models.market_data import MarketData
+from core.timeutils import to_nairobi_date
 
 logger = logging.getLogger(__name__)
 
@@ -394,7 +395,7 @@ class MarketCalculatorService:
 
         by_date: dict[date, DailyObservation] = {}
         for price, volume, volatility, timestamp in rows:
-            trading_date = self._to_nairobi_date(timestamp)
+            trading_date = to_nairobi_date(timestamp)
             by_date[trading_date] = DailyObservation(
                 ticker=ticker,
                 trading_date=trading_date,
@@ -675,14 +676,7 @@ class MarketCalculatorService:
     # ==================================================================
     # TIMEZONE HELPERS
     # ==================================================================
-
-    @staticmethod
-    def _to_nairobi_date(timestamp: datetime) -> date:
-        """Resolve the Africa/Nairobi trading date for a raw timestamp."""
-        if timestamp.tzinfo is None:
-            # Project convention: naive timestamps are already Nairobi-local.
-            return timestamp.date()
-        return timestamp.astimezone(NAIROBI_TZ).date()
+    
 
     @staticmethod
     def _nairobi_day_bounds(target_date: date) -> tuple[datetime, datetime]:

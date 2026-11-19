@@ -46,15 +46,9 @@ import os
 import re
 from datetime import date
 from typing import Any, Optional
+from core.periods import MONTH_NAMES, month_number
 
 logger = logging.getLogger(__name__)
-
-# Defined locally (not imported from services.macro_service) so the scrapers
-# layer never depends on the services layer.
-MONTH_NAMES: list[str] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
 
 INDICATOR_COLUMNS: tuple[str, ...] = (
     "inflation",
@@ -75,7 +69,6 @@ MAX_YEAR: int = 2100
 FILE_LEVEL_ROW: int = 0
 
 _YEAR_MONTH_PATTERN = re.compile(r"^(\d{4})-(\d{1,2})$")
-_MONTH_LOOKUP: dict[str, int] = {name.lower(): i + 1 for i, name in enumerate(MONTH_NAMES)}
 
 
 class MacroCSVParser:
@@ -271,7 +264,7 @@ class MacroCSVParser:
                 return number
             raise ValueError(f"month {value!r} is not in 1-12.")
 
-        number = _MONTH_LOOKUP.get(value.lower())
+        number = month_number(value)
         if number is None:
             raise ValueError(f"month {value!r} is not a recognised month.")
         return number

@@ -62,13 +62,9 @@ from sqlalchemy.orm import Session
 
 from models.daily_market_features import DailyMarketFeatures
 from models.macro_data import MacroData
+from core.periods import period_key, previous_period
 
 logger = logging.getLogger(__name__)
-
-MONTH_ORDER: list[str] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
 
 # macro_data column -> daily_features column.
 # NOTE: fuel_price -> oil_price is a diesel PROXY (see module docstring).
@@ -160,7 +156,7 @@ class MacroFeaturesService:
                     label = f"{row.trading_date.year}-{row.trading_date.month:02d}"
                     if label not in by_month:
                         by_month[label] = self._resolve_values(
-                            keyed, as_of=self._previous_period(row.trading_date)
+                            keyed, as_of=previous_period(row.trading_date.year, row.trading_date.month - 1)
                         )
                     values = by_month[label]
                 else:
@@ -223,7 +219,7 @@ class MacroFeaturesService:
 
         keyed: list[tuple[tuple[int, int], MacroData]] = []
         for row in rows:
-            key = self._period_key(row.month, row.year)
+            key = period_key(row.month, row.year)
             if key is None:
                 logger.debug("Skipping macro row id=%s: unusable month/year.", row.id)
                 continue
@@ -257,27 +253,6 @@ class MacroFeaturesService:
                     }
                     break
         return resolved
-
-    @staticmethod
-    def _previous_period(trading_date) -> tuple[int, int]:
-        
-        if trading_date.month == 1:
-            return trading_date.year - 1, 11
-        return trading_date.year, trading_date.month - 2  # month_index is 0-based
-
-    
-    @staticmethod
-    def _period_key(month: Optional[str], year: Optional[str]) -> Optional[tuple[int, int]]:
-        """(year, month_index) sort key, or None if month/year are unusable."""
-        if not month or not year:
-            return None
-        normalized = str(month).strip().capitalize()
-        if normalized not in MONTH_ORDER:
-            return None
-        try:
-            return int(str(year).strip()), MONTH_ORDER.index(normalized)
-        except ValueError:
-            return None
 
     # ==================================================================
     # TARGET SELECTION

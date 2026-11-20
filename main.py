@@ -17,13 +17,6 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from api import (macroeconomics, market, news, 
-                 news_ingestion, fundamentals, macro_ingestor,
-                macroeconomics, sentiment, signals, macro_features, 
-                alerts, analysis, macro_features)
-from database.session import init_db
-from scrapers.market_fetcher import MarketFetchError
-
 # ---------------------------------------------------------------------------
 # Logging — structured, one-liner format good for terminal and future log
 # aggregators (Loki, CloudWatch, etc.)
@@ -31,10 +24,16 @@ from scrapers.market_fetcher import MarketFetchError
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
 )
-
 logger = logging.getLogger(__name__)
+
+from api import (macroeconomics, market, news, 
+                 news_ingestion, fundamentals, macro_ingestor,
+                macroeconomics, sentiment, signals, macro_features, 
+                alerts, analysis, macro_features)
+from database.session import init_db
+from scrapers.market_fetcher import MarketFetchError
+
 
 # ---------------------------------------------------------------------------
 # App

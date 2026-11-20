@@ -95,14 +95,15 @@ FUEL EXTRACTOR NOTE (see FuelExtractor below):
 import logging
 import os
 import re
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse, unquote
 from core.periods import MONTH_NAMES
+from dotenv import load_dotenv
 
 import pdfplumber
-import camelot
 import requests
 import urllib3
 from requests.adapters import HTTPAdapter
@@ -112,12 +113,17 @@ from rapidfuzz import fuzz
 # ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
-
+load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("knbs_extractor")
+# KNBS PDF download SSL configuration
+KNBS_VERIFY_SSL = os.getenv("KNBS_VERIFY_SSL", "true").lower() != "false"
+
+# Optional path to a trusted CA certificate bundle
+KNBS_CA_BUNDLE = os.getenv("KNBS_CA_BUNDLE")
 
 
 # ---------------------------------------------------------------------------
@@ -208,21 +214,37 @@ class PDFManager:
         session.mount("http://", adapter)
         session.mount("https://", adapter)
 
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        logger.warning("SSL verification disabled for PDF download")
+        # Use a custom CA bundle if provided; otherwise use SSL verification setting.
+        verify = KNBS_CA_BUNDLE or KNBS_VERIFY_SSL
 
         try:
-            response = session.get(
-                pdf_url,
-                timeout=30,
-                verify=False,
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            response.raise_for_status()
+            with warnings.catch_warnings():
+
+                # Suppress insecure-request warnings only for this download.
+                if verify is False:
+                    warnings.simplefilter(
+                        "ignore",
+                        urllib3.exceptions.InsecureRequestWarning,
+                    )
+                    logger.warning(
+                        "SSL verification disabled for %s",
+                        pdf_url,
+                    )
+
+                response = session.get(
+                    pdf_url,
+                    timeout=30,
+                    verify=verify,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+
+                response.raise_for_status()
+
         except requests.RequestException as exc:
             logger.error("Could not download PDF")
-            raise RuntimeError(f"Failed to download PDF from {pdf_url}: {exc}") from exc
-
+            raise RuntimeError(
+                f"Failed to download PDF from {pdf_url}: {exc}"
+            ) from exc
         with open(local_pdf_path, "wb") as f:
             f.write(response.content)
 
@@ -535,6 +557,7 @@ class PipelineEngine:
                 One entry per table found (a single page may yield multiple
                 tables, or none).
         """
+        import camelot
         candidate_tables = []
 
         for page_number in candidate_pages:
@@ -2216,4 +2239,6 @@ if __name__ == "__main__":
     # fuel_results = knbs.get_fuels(sample_url)
     #
     # knbs.close()
+    logging.basicConfig(level=logging.INFO, 
+                        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
     pass

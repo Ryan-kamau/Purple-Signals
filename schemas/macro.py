@@ -1,6 +1,6 @@
 # schemas/macro.py
 
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
 from datetime import datetime
 from typing import Dict, Any
 class IngestionResponse(BaseModel):
@@ -19,6 +19,11 @@ class IngestionResponse(BaseModel):
     errors: list[str]
 
     fallback_used: bool
+
+class IngestionRequest(BaseModel):
+    """Request body shared by every macro ingestion endpoint."""
+
+    pdf_url: HttpUrl
 
 """
 Response schema for the read-only /macroeconomics router.

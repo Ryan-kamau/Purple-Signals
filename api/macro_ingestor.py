@@ -22,42 +22,20 @@ Mount in main.py:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Generator
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 
 from database.session import get_db
 from services.macro_service import MacroService
+from scrapers.macro_scraper import KNBSExtractor
+from schemas.macro import IngestionResponse, IngestionRequest
 
 router = APIRouter(prefix="/macro", tags=["Macro Ingestion"])
 
 NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
-
-
-# ---------------------------------------------------------------------------
-# Request / Response models
-# ---------------------------------------------------------------------------
-
-class IngestionRequest(BaseModel):
-    """Request body shared by every macro ingestion endpoint."""
-
-    pdf_url: HttpUrl
-
-
-class IngestionResponse(BaseModel):
-    """
-    Response returned by MacroData ingestion operations.
-    """
-
-    success: bool
-    report_date: datetime
-    saved: int
-    results: Dict[str, Dict[str, Any]]
-    errors: list[str]
-    fallback_used: bool
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +201,18 @@ def _run_ingestion(
     return _build_response(raw, extractor_key=extractor_key)
 
 
-def _get_service(db: Session = Depends(get_db)) -> MacroService:
-    """FastAPI dependency — construct a MacroService bound to the request session."""
-    return MacroService(db)
+
+def _get_service(
+    db: Session = Depends(get_db),
+) -> Generator[MacroService, None, None]:
+    """Provide a MacroService and clean up its extractor after the request."""
+
+    extractor = KNBSExtractor()
+
+    try:
+        yield MacroService(db, extractor=extractor)
+    finally:
+        extractor.close()
 
 
 # ---------------------------------------------------------------------------

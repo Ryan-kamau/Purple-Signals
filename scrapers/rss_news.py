@@ -7,10 +7,10 @@ Pipeline position:
     RSS Feeds  →  RSSNewsIngestor  →  KeywordEngine  →  Headline DB  →  API
 
 This module mirrors the NewsService pipeline exactly:
-  1. Fetch raw entries from RSS/Atom feeds via feedparser
+  1. Fetch RSS/Atom feeds via requests and parse entries with feedparser
   2. Normalise raw feedparser entries into article dicts
   3. Run KeywordEngine.enrich_articles() on the full batch
-  4. Filter out low-impact articles (impact_score < IMPACT_SCORE_THRESHOLD)
+  4. Filter articles using RelevanceFilter
   5. Validate required fields (headline, url, source)
   6. Deduplicate against existing DB rows (chunked IN query)
   7. Build Headline ORM objects from enriched, normalised dicts
@@ -53,6 +53,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 import hashlib
 import feedparser
+import requests
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from intelligence.keywords_engine import KeywordEngine
@@ -67,12 +69,12 @@ from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
+_FEED_HEADERS = {
+    "User-Agent": "KPLCIntelligenceEngine/1.0",
+    "Accept": "application/rss+xml, application/xml, text/xml",
+}
 
-# Minimum weighted impact score required for an article to be persisted.
-# Mirrors the threshold used in NewsService._store_fetch_response().
-# Articles scoring below this are logged and silently discarded.
-IMPACT_SCORE_THRESHOLD: int = 2
+NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
 
 # Maximum number of URLs to pass in a single SQL IN clause to avoid
 # database parameter-count limits (e.g. SQLite's 999-variable limit).
@@ -158,11 +160,7 @@ class RSSNewsIngestor:
         keyword_engine:          KeywordEngine instance. Inject a custom subclass
                                  to override keywords/weights without touching this
                                  file. Defaults to KeywordEngine().
-        request_timeout:         HTTP timeout in seconds for feedparser. Default: 15.
-        fallback_enabled:        Return synthetic articles when a feed is unavailable.
-                                 Default: False.
-        impact_score_threshold:  Minimum impact score for an article to be stored.
-                                 Default: IMPACT_SCORE_THRESHOLD (2).
+        request_timeout:         HTTP read timeout in seconds. Default: 15.
 
     Example::
 
@@ -179,15 +177,11 @@ class RSSNewsIngestor:
         session: Session,
         keyword_engine: Optional[KeywordEngine] = None,
         request_timeout: int = 15,
-        fallback_enabled: bool = False,
-        impact_score_threshold: int = IMPACT_SCORE_THRESHOLD,
         relevance_filter: Optional[RelevanceFilter] = None,   # new kwarg
     ) -> None:
         self._session = session
         self._keyword_engine = keyword_engine or KeywordEngine()
         self._timeout = request_timeout
-        self._fallback_enabled = fallback_enabled
-        self._impact_score_threshold = impact_score_threshold
         self._relevance = relevance_filter or RelevanceFilter()
 
     # ------------------------------------------------------------------
@@ -204,11 +198,11 @@ class RSSNewsIngestor:
         Fetch, enrich, validate, deduplicate, and persist articles from one RSS feed.
 
         Pipeline steps:
-          1. Fetch the feed via feedparser.
+          1. Fetch the feed via requests and parse with feedparser.
           2. Validate that the feed has parseable entries.
           3. Normalise each entry into an article dict (NewsAPI-compatible shape).
           4. Run KeywordEngine.enrich_articles() on the full normalised batch.
-          5. Filter articles below IMPACT_SCORE_THRESHOLD.
+          5. Filter articles with RelevanceFilter.
           6. Build Headline-ready dicts from enriched articles.
           7. Deduplicate against existing DB rows (chunked IN query).
           8. Bulk-insert new articles in a single transaction.
@@ -235,15 +229,6 @@ class RSSNewsIngestor:
             error_msg = fetch_error or f"Unknown fetch failure for {feed_url}"
             logger.error("RSS fetch failed: url=%s error=%s", feed_url, error_msg)
 
-            if self._fallback_enabled:
-                logger.warning("RSS fallback activated: url=%s", feed_url)
-                return self._store_fallback(
-                    feed_url=feed_url,
-                    source_label=source_label or feed_url,
-                    error_msg=error_msg,
-                    errors=errors,
-                )
-
             return self._failure_response(
                 feed_url=feed_url,
                 error=error_msg,
@@ -259,17 +244,6 @@ class RSSNewsIngestor:
                 feed_url,
                 validation_error,
             )
-
-            if self._fallback_enabled:
-                logger.warning(
-                    "RSS fallback activated after empty feed: url=%s", feed_url
-                )
-                return self._store_fallback(
-                    feed_url=feed_url,
-                    source_label=source_label or feed_url,
-                    error_msg=validation_error or "Empty or invalid feed",
-                    errors=errors,
-                )
 
             return self._empty_response(feed_url=feed_url, fetched=0)
 
@@ -311,26 +285,25 @@ class RSSNewsIngestor:
             len(enriched_articles),
         )
 
-        # ── Step 5: Filter by impact score ──────────────────────────────────
+        # ── Step 5: Filter by relevance ──────────────────────────────────
         filtered_articles: List[Dict[str, Any]] = []
-        low_impact_count = 0
+        rejected_count = 0
 
         for article in enriched_articles:
             decision = self._relevance.evaluate(article, is_local=(region == "kenya"))
             if not decision.keep:
                 logger.debug("RSS rejected: %r", str(article.get("title", ""))[:80])
-                low_impact_count += 1
+                rejected_count += 1
                 continue
             article["relevance_tier"] = decision.tier
             article["matched_tickers"] = decision.tickers
             filtered_articles.append(article)
 
-        if low_impact_count:
+        if rejected_count:
             logger.info(
-                "RSS impact filter: source=%s discarded=%d threshold=%d",
+                "RSS relevance filter: source=%s rejected=%d",
                 resolved_source,
-                low_impact_count,
-                self._impact_score_threshold,
+                rejected_count,
             )
 
         # ── Step 6: Build Headline-ready dicts from enriched articles ───────
@@ -339,7 +312,13 @@ class RSSNewsIngestor:
         ]
 
         # ── Step 7: Deduplicate within batch + against DB ───────────────────
-        new_articles, duplicate_count = self._deduplicate(normalised_for_db)
+        try:
+            new_articles, duplicate_count = self._deduplicate(normalised_for_db)
+        except SQLAlchemyError as exc:
+            self._rollback_safely()
+            msg = f"Dedup lookup failed: {exc}"
+            logger.error("RSS %s url=%s", msg, feed_url)
+            return self._failure_response(feed_url=feed_url, error=msg, errors=errors + [msg])
 
         # ── Step 8: Bulk insert ─────────────────────────────────────────────
         saved_count = 0
@@ -354,12 +333,12 @@ class RSSNewsIngestor:
 
         logger.info(
             "RSS ingest complete: source=%s url=%s fetched=%d enriched=%d "
-            "low_impact=%d saved=%d duplicates=%d invalid=%d duration=%.3fs",
+            "rejected=%d saved=%d duplicates=%d invalid=%d duration=%.3fs",
             resolved_source,
             feed_url,
             fetched_count,
             len(enriched_articles),
-            low_impact_count,
+            rejected_count,
             saved_count,
             duplicate_count,
             invalid_count,
@@ -371,7 +350,7 @@ class RSSNewsIngestor:
             fetched=fetched_count,
             saved=saved_count,
             duplicates=duplicate_count,
-            invalid=invalid_count + low_impact_count,
+            invalid=invalid_count + rejected_count,
             stored_ids=stored_ids,
             errors=errors,
         )
@@ -387,8 +366,6 @@ class RSSNewsIngestor:
         feeds: Optional[List[Dict[str, str]]] = None,
         keyword_engine: Optional[KeywordEngine] = None,
         request_timeout: int = 15,
-        fallback_enabled: bool = False,
-        impact_score_threshold: int = IMPACT_SCORE_THRESHOLD,
     ) -> List[IngestionResponse]:
         """
         Ingest every feed in the default registry (or a custom list).
@@ -403,8 +380,6 @@ class RSSNewsIngestor:
                                     Defaults to DEFAULT_FEEDS.
             keyword_engine:         Optional shared KeywordEngine instance.
             request_timeout:        HTTP timeout per feed in seconds.
-            fallback_enabled:       Passed to each RSSNewsIngestor instance.
-            impact_score_threshold: Minimum impact score to persist. Default: 2.
 
         Returns:
             List of IngestionResponse objects — one per feed, in order.
@@ -421,8 +396,6 @@ class RSSNewsIngestor:
             session,
             keyword_engine=shared_engine,
             request_timeout=request_timeout,
-            fallback_enabled=fallback_enabled,
-            impact_score_threshold=impact_score_threshold,
         )
         results: List[IngestionResponse] = []
 
@@ -476,17 +449,16 @@ class RSSNewsIngestor:
         logger.info("RSS fetch started: url=%s timeout=%ds", feed_url, self._timeout)
 
         try:
-            parsed = feedparser.parse(
-                feed_url,
-                agent="KPLCIntelligenceEngine/1.0",
-                request_headers={
-                    "Accept": "application/rss+xml, application/xml, text/xml",
-                },
-            )
+            resp = requests.get(feed_url, headers=_FEED_HEADERS, timeout=(5, self._timeout))
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("RSS request failed: url=%s error=%s", feed_url, exc)
+            return None, f"RSS request failed for {feed_url}: {exc}"
+
+        try:
+            parsed = feedparser.parse(resp.content)
         except Exception as exc:
-            error = f"feedparser raised unexpected exception for {feed_url}: {exc}"
-            logger.error("RSS fetch exception: url=%s error=%s", feed_url, exc)
-            return None, error
+            return None, f"feedparser raised unexpected exception for {feed_url}: {exc}"
 
         # feedparser sets bozo=True for malformed feeds but still returns
         # partial data. Only fatal if entries are absent too.
@@ -507,12 +479,6 @@ class RSSNewsIngestor:
                 bozo_exc,
                 len(entries),
             )
-
-        status = parsed.get("status")
-        if status and status >= 400:
-            error = f"RSS feed returned HTTP {status}: {feed_url}"
-            logger.error("RSS fetch HTTP error: url=%s status=%s", feed_url, status)
-            return None, error
 
         logger.info(
             "RSS fetch succeeded: url=%s entries=%d",
@@ -759,155 +725,6 @@ class RSSNewsIngestor:
         }
 
     # ------------------------------------------------------------------
-    # Private: fallback
-    # ------------------------------------------------------------------
-
-    def _generate_fallback_articles(
-        self,
-        source: str,
-        feed_url: str,
-    ) -> List[Dict[str, Any]]:
-        """
-        Generate NewsAPI-shaped fallback articles for development and resilient
-        scheduled jobs when a live feed is unavailable.
-
-        Fallback articles use the same NewsAPI-compatible shape as
-        _normalise_entry_to_newsapi_shape() output so KeywordEngine can
-        enrich them identically to live articles.
-
-        Args:
-            source:   Source label for the unavailable feed.
-            feed_url: Feed URL used in fallback URLs to keep them unique.
-
-        Returns:
-            List of three NewsAPI-shaped article dicts.
-        """
-        now_iso = self._current_time().isoformat()
-        url_base = feed_url.replace("https://", "").split("/")[0]
-
-        articles = [
-            {
-                "title": f"Markets monitor macro signals — {source} feed unavailable",
-                "description": (
-                    "Investors tracked central-bank guidance, currency moves, and "
-                    "commodity prices as analysts assessed the latest risk tone. "
-                    "Fallback article generated while the feed was unreachable."
-                ),
-                "content": (
-                    "Market participants focused on policy direction, liquidity "
-                    "conditions, and cross-asset volatility. Inflation and interest "
-                    "rate expectations remained key variables driving sentiment."
-                ),
-                "url": f"https://example.com/rss-fallback/{url_base}/macro-signals",
-                "publishedAt": now_iso,
-                "source": {"id": None, "name": source},
-            },
-            {
-                "title": f"Companies review exposure amid uncertainty — {source} fallback",
-                "description": (
-                    "Corporate finance teams reviewed supply chains, financing "
-                    "costs, and consumer demand against a mixed macro backdrop."
-                ),
-                "content": (
-                    "Executives said planning assumptions remain sensitive to "
-                    "interest rates, exchange rates, and fuel prices. IMF projections "
-                    "and CBK policy guidance were cited as key inputs."
-                ),
-                "url": f"https://example.com/rss-fallback/{url_base}/company-exposure",
-                "publishedAt": now_iso,
-                "source": {"id": None, "name": source},
-            },
-            {
-                "title": f"Analysts flag inflation and currency risks — {source} fallback",
-                "description": (
-                    "Research desks highlighted inflation expectations, foreign "
-                    "exchange liquidity, and trade flows as key variables to watch."
-                ),
-                "content": (
-                    "Analysts expect market attention to remain on inflation data, "
-                    "fiscal policy, budget announcements, and currency stability. "
-                    "EPRA tariff reviews and energy sector developments also flagged."
-                ),
-                "url": f"https://example.com/rss-fallback/{url_base}/inflation-risks",
-                "publishedAt": now_iso,
-                "source": {"id": None, "name": source},
-            },
-        ]
-
-        logger.info(
-            "RSS fallback articles generated: source=%s count=%d",
-            source,
-            len(articles),
-        )
-        return articles
-
-    def _store_fallback(
-        self,
-        feed_url: str,
-        source_label: str,
-        error_msg: str,
-        errors: List[str],
-    ) -> IngestionResponse:
-        """
-        Enrich fallback articles through KeywordEngine, then persist them.
-
-        Fallback articles go through the full enrichment + threshold pipeline
-        so they produce properly tagged Headline rows with keywords_detected,
-        categories, and impact_score populated — not empty stubs.
-
-        Args:
-            feed_url:     Original feed URL (used as endpoint reference).
-            source_label: Resolved source name.
-            error_msg:    Human-readable reason for fallback activation.
-            errors:       Accumulated error list from earlier pipeline steps.
-
-        Returns:
-            IngestionResponse with fallback_used=True.
-        """
-        raw_fallback = self._generate_fallback_articles(source_label, feed_url)
-
-        # Run through KeywordEngine — fallback articles are keyword-rich
-        # by design so they reliably pass the impact_score threshold.
-        enriched_fallback = self._keyword_engine.enrich_articles(raw_fallback)
-
-        filtered_fallback = [
-            a for a in enriched_fallback
-            if a.get("impact_score", 0) >= self._impact_score_threshold
-        ]
-
-        normalised_for_db = [
-            self._build_headline_dict(a) for a in filtered_fallback
-        ]
-
-        new_articles, duplicate_count = self._deduplicate(normalised_for_db)
-
-        saved_count = 0
-        stored_ids: List[int] = []
-
-        # Do NOT persist fallback articles.
-        # They are synthetic records used only to indicate feed failure.
-
-        logger.warning(
-            "Fallback articles generated but NOT stored: source=%s count=%d",
-            source_label,
-            len(filtered_fallback),
-        )
-
-        return IngestionResponse(
-            success=True,
-            endpoint=feed_url,
-            fetched=len(raw_fallback),
-            saved=0,
-            duplicates=0,
-            invalid=0,
-            errors=errors + [error_msg],
-            fallback_used=True,
-            processed_at=self._current_time(),
-            stored_ids=[],
-            error=error_msg,
-        )
-
-    # ------------------------------------------------------------------
     # Private: deduplication
     # ------------------------------------------------------------------
     @staticmethod
@@ -960,13 +777,10 @@ class RSSNewsIngestor:
 
         for start in range(0, len(unique_hashes), _URL_CHUNK_SIZE):
             chunk = unique_hashes[start:start + _URL_CHUNK_SIZE]
-            try:
-                rows = self._session.scalars(
-                    select(Headline.url_hash).where(Headline.url_hash.in_(chunk))
-                ).all()
-                existing.update(rows)
-            except Exception as exc:
-                logger.error("Hash dedup query failed at chunk %d: %s", start, exc)
+            rows = self._session.scalars(
+                select(Headline.url_hash).where(Headline.url_hash.in_(chunk))
+            ).all()
+            existing.update(rows)
 
         return existing
 
@@ -1025,11 +839,44 @@ class RSSNewsIngestor:
             )
             return len(orm_objects), stored_ids, None
 
+        except IntegrityError:
+            self._rollback_safely()
+            return self._insert_row_by_row(articles)
         except Exception as exc:
             self._rollback_safely()
             error_msg = f"Database bulk insert failed: {exc}"
             logger.error(error_msg)
             return 0, [], error_msg
+
+    def _insert_row_by_row(
+        self, articles: List[Dict[str, Any]]
+    ) -> Tuple[int, List[int], Optional[str]]:
+        """Retry after a bulk uniqueness collision, isolating each row in a savepoint."""
+        stored_ids: List[int] = []
+        try:
+            for article in articles:
+                data = dict(article)
+                tickers = tuple(dict.fromkeys(data.pop("matched_tickers", ())))
+                try:
+                    with self._session.begin_nested():
+                        obj = Headline(**data)
+                        self._session.add(obj)
+                        self._session.flush()
+                        self._session.add_all([
+                            ArticleSecurity(article_id=obj.id, ticker=ticker)
+                            for ticker in tickers
+                        ])
+                        self._session.flush()
+                    stored_ids.append(obj.id)
+                except IntegrityError:
+                    logger.info("RSS duplicate skipped during row retry: url=%s", data.get("url"))
+            self._session.commit()
+            return len(stored_ids), stored_ids, None
+        except Exception as exc:
+            self._rollback_safely()
+            msg = f"Database row-by-row retry failed: {exc}"
+            logger.error(msg)
+            return 0, [], msg
 
     def _rollback_safely(self) -> None:
         """Attempt a session rollback without masking the original exception."""

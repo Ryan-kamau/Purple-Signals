@@ -1,5 +1,5 @@
 """
-services/fundamental_extractor.py
+scrapers/kplc_pdf.py
 
 Production-ready service for extracting KPLC fundamental metrics from
 audited financial result PDFs, calculating key ratios, and persisting
@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 
 from models.fundamental_data import Fundamentals
 from models.market_data import MarketData
-from database.session import  SessionLocal
+from database.session import SessionLocal
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -192,8 +192,8 @@ class KPLCFundamentalExtractor:
             RuntimeError: If the database write fails.
         """
         record = Fundamentals(
-            ticker=KPLC_TICKER,
-            company="Kenya Power and Lighting Company Plc",
+            ticker=metrics["ticker"],
+            company=metrics["company"],
             report_date=metrics["report_date"],
             eps=metrics["eps"],
             pe_ratio=metrics["pe_ratio"],
@@ -363,81 +363,33 @@ class KPLCFundamentalExtractor:
         interim_dividend = 0.0
         final_dividend = 0.0
         for i, line in enumerate(lines):
-            if "interim dividend" in line.lower():
-                logger.info("LINE %s -> %s", i, line)
-
-                for j in range(i, min(i + 5, len(lines))):
-                    logger.info("NEXT %s -> %s", j, lines[j])
-
-        for line in lines:
-
             normalized = self._normalize_text(line)
 
-            # Financial statement rows
+            # Extract each financial metric at most once.
             for row_text, field in _METRIC_ROWS.items():
-
-                row_normalized = self._normalize_text(row_text)
-
-                if normalized.startswith(row_normalized):
-
-                    # Don't overwrite an already extracted value
-                    if raw[field] is not None:
-                        continue
-
+                if raw[field] is None and normalized.startswith(self._normalize_text(row_text)):
                     value = self._extract_2025_value(line)
-
                     if value is not None:
                         raw[field] = value
+                        logger.info("Extracted %-25s = %s", field, value)
 
-                        logger.info(
-                            "Extracted %-25s = %s",
-                            field,
-                            value,
-                        )
-            for i, line in enumerate(lines):
+            # Check dividends during the same pass, not once per PDF line.
+            if self._normalize_text(_INTERIM_DIVIDEND_KW) in normalized and interim_dividend == 0.0:
+                value = self._extract_2025_value(line)
+                if value is None and i + 1 < len(lines):
+                    value = self._extract_2025_value(lines[i + 1])
+                if value is not None:
+                    interim_dividend = value
+                    logger.info("Extracted interim dividend = %s", value)
 
-                normalized = self._normalize_text(line)
+            if self._normalize_text(_FINAL_DIVIDEND_KW) in normalized and final_dividend == 0.0:
+                value = self._extract_2025_value(line)
+                if value is None and i + 1 < len(lines):
+                    value = self._extract_2025_value(lines[i + 1])
+                if value is not None:
+                    final_dividend = value
+                    logger.info("Extracted final dividend = %s", value)
 
-                # ------------------------------
-                # Interim dividend
-                # ------------------------------
-                if (
-                    "interim dividend" in normalized
-                    and interim_dividend == 0.0
-                ):
-
-                    value = self._extract_2025_value(line)
-
-                    # number may be on next line
-                    if value is None and i + 1 < len(lines):
-                        value = self._extract_2025_value(lines[i + 1])
-
-                    if value is not None:
-                        interim_dividend = value
-                        logger.info(
-                            "Extracted interim dividend = %s",
-                            interim_dividend,
-                        )
-
-                # ------------------------------
-                # Final dividend
-                # ------------------------------
-                if (
-                    "final dividend" in normalized
-                    and final_dividend == 0.0
-                ):
-
-                    value = self._extract_2025_value(line)
-
-                    if value is None and i + 1 < len(lines):
-                        value = self._extract_2025_value(lines[i + 1])
-
-                    if value is not None:
-                        final_dividend = value
-                        logger.info(
-                            "Extracted final dividend = %s",
-                            final_dividend,
-                        )
         raw["dividend_per_share"] = interim_dividend + final_dividend
 
         required = [
@@ -564,7 +516,7 @@ class KPLCFundamentalExtractor:
 
 
 # ---------------------------------------------------------------------------
-# CLI smoke-test:  python services/fundamental_extractor.py
+# CLI smoke-test:  python scrapers/kplc_pdf.py
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

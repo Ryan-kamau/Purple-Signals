@@ -153,7 +153,7 @@ def _handle_unexpected(exc: Exception, context: str) -> None:
     summary="Analyze sentiment for arbitrary text",
     description=(
         "Scores an arbitrary piece of text end-to-end (validate -> clean -> "
-        "VADER -> custom weighted score) via SentimentAnalyzer.analyze_headline(). "
+        "FinBERT -> P(positive) - P(negative)) via SentimentAnalyzer.analyze_headline(). "
         "Performs no database I/O. Returns 422 if the text contains no "
         "meaningful, scorable content (e.g. empty, a bare link, an RSS "
         "placeholder, or HTML-only)."

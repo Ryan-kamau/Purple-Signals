@@ -343,8 +343,9 @@ def ingest_kenya_feeds(
     """
     Trigger ingestion for Kenyan-only news sources.
 
-    This is the primary feed for KPLC-specific intelligence — local business
-    news, NSE coverage, energy sector stories, and government policy signals.
+    This is the primary feed for company-level and local-market intelligence
+    across NSE equities — local business news, NSE coverage, sector stories,
+    and government policy signals.
 
     Useful for scheduled jobs that need a quick local refresh without
     waiting for slower international feeds (FT, IMF, Reuters).
@@ -390,7 +391,7 @@ def ingest_global_feeds(
     """
     Trigger ingestion for global macro news sources.
 
-    These feeds provide macroeconomic context for KPLC analysis:
+    These feeds provide macroeconomic context for NSE analysis:
     oil price movements, Fed/IMF policy signals, geopolitical risk,
     and global market stress indicators that flow through to NSE.
 
@@ -430,7 +431,7 @@ def ingest_global_feeds(
     description=(
         "Accepts any valid RSS/Atom URL.  Useful for one-off ingestion of "
         "custom sources — CBK press releases, company investor relations pages, "
-        "EPRA announcements, or any feed relevant to KPLC / NSE analysis."
+        "EPRA announcements, or any feed relevant to NSE analysis"
     ),
 )
 def ingest_custom_feed(

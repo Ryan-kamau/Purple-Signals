@@ -1,5 +1,5 @@
 """
-intelligence/keyword_engine.py
+intelligence/keywords_engine.py
 
 Pure intelligence layer — keyword detection, category tagging, and impact
 scoring for financial news articles sourced from NewsFetcher.
@@ -39,7 +39,9 @@ class KeywordEngine:
 
     Class-level constants (KEYWORDS, WEIGHTS) are designed to be overridden
     by subclasses or extended at runtime, keeping the engine flexible as the
-    platform expands to new markets and signal types.
+    platform expands to new markets and signal types.  If KEYWORDS is mutated
+    at runtime, call ``_build_lookup()`` afterwards to rebuild the compiled
+    patterns (subclasses get this automatically via ``__init_subclass__``).
 
     Example usage::
 
@@ -137,15 +139,23 @@ class KeywordEngine:
     DEFAULT_WEIGHT: int = 1
 
     # ------------------------------------------------------------------
-    # Internal flat keyword lookup built once at class definition time.
-    # Avoids re-iterating KEYWORDS on every article.
-    # Maps keyword → category (last write wins for keywords that appear
-    # in multiple categories — e.g. "cbk" appears in macro_economy and
-    # kenya_policy; the lookup is only used for fast membership tests so
-    # the exact category-per-keyword mapping is not critical here).
+    # Internal lookups built once per class by _build_lookup().
+    #
+    # _KEYWORD_TO_CATEGORIES : keyword -> every category that lists it
+    #                          (e.g. "cbk" -> macro_economy, kenya_policy).
+    # _SINGLE_WORD_PATTERN   : one compiled \b(?:a|b|c)\b alternation for all
+    #                          single-word keywords (word-boundary safe, so
+    #                          "war" never matches "warning").
+    # _PHRASE_PATTERN        : one compiled alternation for all multi-word
+    #                          keywords (substring match, as before).
+    #
+    # Two patterns rather than one so a single-word keyword that happens to
+    # sit inside a phrase can never be swallowed by a non-overlapping match.
     # ------------------------------------------------------------------
 
     _KEYWORD_TO_CATEGORIES: Dict[str, List[str]] = {}
+    _SINGLE_WORD_PATTERN: Optional["re.Pattern[str]"] = None
+    _PHRASE_PATTERN: Optional["re.Pattern[str]"] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -153,12 +163,25 @@ class KeywordEngine:
 
     @classmethod
     def _build_lookup(cls) -> None:
-        """Rebuild the internal keyword→categories lookup from KEYWORDS."""
+        """Rebuild the keyword→categories lookup and compiled patterns from KEYWORDS."""
         mapping: Dict[str, List[str]] = {}
         for category, keywords in cls.KEYWORDS.items():
             for kw in keywords:
                 mapping.setdefault(kw.lower(), []).append(category)
         cls._KEYWORD_TO_CATEGORIES = mapping
+
+        # Longest-first so the regex prefers the most specific alternative.
+        singles = sorted((k for k in mapping if " " not in k), key=len, reverse=True)
+        phrases = sorted((k for k in mapping if " " in k), key=len, reverse=True)
+
+        cls._SINGLE_WORD_PATTERN = (
+            re.compile(r"\b(?:" + "|".join(re.escape(k) for k in singles) + r")\b")
+            if singles else None
+        )
+        cls._PHRASE_PATTERN = (
+            re.compile("|".join(re.escape(k) for k in phrases))
+            if phrases else None
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -170,6 +193,11 @@ class KeywordEngine:
 
         Matching is case-insensitive and duplicate-safe: a keyword that
         appears multiple times is returned only once.
+
+        Single-word keywords use word-boundary matching; multi-word phrases
+        are matched as substrings.  Both are resolved by precompiled
+        alternation patterns, so cost is one pass over the text per pattern
+        regardless of how many keywords are configured.
 
         Args:
             text: Raw combined article text (title + description + content).
@@ -190,19 +218,10 @@ class KeywordEngine:
         normalised = text.lower()
         found: Set[str] = set()
 
-        for category_keywords in self.KEYWORDS.values():
-            for keyword in category_keywords:
-                kw_lower = keyword.lower()
-                # Use word-boundary-aware search for single-word keywords;
-                # multi-word phrases are matched as substrings (sufficient
-                # for the current keyword set and avoids false negatives).
-                if " " in kw_lower:
-                    if kw_lower in normalised:
-                        found.add(kw_lower)
-                else:
-                    pattern = r"\b" + re.escape(kw_lower) + r"\b"
-                    if re.search(pattern, normalised):
-                        found.add(kw_lower)
+        if self._SINGLE_WORD_PATTERN is not None:
+            found.update(self._SINGLE_WORD_PATTERN.findall(normalised))
+        if self._PHRASE_PATTERN is not None:
+            found.update(self._PHRASE_PATTERN.findall(normalised))
 
         matched = sorted(found)
         logger.debug("extract_keywords: found %d keyword(s): %s", len(matched), matched)
@@ -229,17 +248,7 @@ class KeywordEngine:
         if not text or not isinstance(text, str):
             return []
 
-        matched_keywords = self.extract_keywords(text)
-        matched_keyword_set = set(matched_keywords)
-
-        categories: Set[str] = set()
-        for category, keywords in self.KEYWORDS.items():
-            for kw in keywords:
-                if kw.lower() in matched_keyword_set:
-                    categories.add(category)
-                    break  # one match is enough for the category
-
-        result = sorted(categories)
+        result = self._categories_for_keywords(self.extract_keywords(text))
         logger.debug("extract_categories: matched categories %s", result)
         return result
 
@@ -307,6 +316,9 @@ class KeywordEngine:
         Invalid or non-dict inputs are returned with zeroed intelligence
         fields so downstream code never receives ``None`` values.
 
+        Keywords are extracted once; categories are derived from that result
+        rather than re-scanning the text.
+
         Args:
             article: A raw NewsAPI article dict (may contain title,
                      description, content, source, url, publishedAt, etc.).
@@ -343,7 +355,7 @@ class KeywordEngine:
         combined_text = self._build_combined_text(article)
 
         keywords = self.extract_keywords(combined_text)
-        categories = self.extract_categories(combined_text)
+        categories = self._categories_for_keywords(keywords)
         impact_score = self.calculate_impact_score(keywords)
         keyword_count = self.count_keyword_matches(keywords)
 
@@ -410,6 +422,22 @@ class KeywordEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _categories_for_keywords(self, keywords: List[str]) -> List[str]:
+        """
+        Map already-extracted keywords to their categories using the
+        precomputed keyword→categories lookup (no text scanning).
+
+        Args:
+            keywords: Keywords as returned by :meth:`extract_keywords`.
+
+        Returns:
+            Alphabetically sorted list of unique category names.
+        """
+        categories: Set[str] = set()
+        for kw in keywords:
+            categories.update(self._KEYWORD_TO_CATEGORIES.get(kw.lower(), ()))
+        return sorted(categories)
 
     def _build_combined_text(self, article: Dict[str, Any]) -> str:
         """

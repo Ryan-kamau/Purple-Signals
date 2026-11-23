@@ -29,7 +29,6 @@ Rules (decided with the project owner):
     are never overwritten, and None is never written.
   - This service NEVER creates daily_features rows. Row ownership belongs
     to MarketCalculatorService (see PRD, "Row ownership").
-  #  Rules section — replace the last bullet with:
   - Default run fills each ticker's latest trading_date row using the newest
     macro values. With backfill=True, every row that still has a NULL macro
     column is filled using the macro values of the month BEFORE that row's
@@ -37,14 +36,12 @@ Rules (decided with the project owner):
     if that month is NULL or missing, the most recent earlier month with a
     value is used. Backfill never uses data from the row's own month or later.
 
-#  Known limitations — DELETE the "backfill=True writes TODAY's macro values..." bullet.
 Known limitations (recorded, not silently fixed):
-  - oil_price is populated from macro_data.fuel_price (KNBS diesel,
-    KSh/litre). It is a PROXY, not crude/Brent. Replace when a real oil
-    source exists.
-  - backfill=True writes TODAY's macro values onto historical rows. That
-    leaks the future into any backtest/ML training use of those rows. The
-    default mode, run daily, is effectively point-in-time.
+  - oil_price is populated from macro_data.fuel_price ...
+  - backfill=True uses the month BEFORE each row's trading_date month, but
+    KNBS publishes ~2 months late, so a row may still carry macro values that
+    were not yet public on that date. Mild lookahead for backtests/ML; the
+    default daily mode is effectively point-in-time.
   - Macro data is monthly and published with a lag, so values repeat
     across many trading days.
   - No staleness limit: a fallback value may come from an old month. The

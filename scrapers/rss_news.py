@@ -1,5 +1,5 @@
 """
-scrapers/rss_news_ingestor.py
+scrapers/rss_news.py
 
 RSS News Ingestion Service — Kenya Intelligence Platform
 
@@ -30,7 +30,7 @@ This module does NOT:
   - Contain FastAPI routes
 
 Usage:
-    from scrapers.rss_news_ingestor import RSSNewsIngestor
+    from scrapers.rss_news import RSSNewsIngestor
 
     service = RSSNewsIngestor(session)
 
@@ -70,7 +70,7 @@ from sqlalchemy import select
 logger = logging.getLogger(__name__)
 
 _FEED_HEADERS = {
-    "User-Agent": "KPLCIntelligenceEngine/1.0",
+    "User-Agent": "PurpleSignals/1.0",
     "Accept": "application/rss+xml, application/xml, text/xml",
 }
 
@@ -1046,7 +1046,7 @@ class RSSNewsIngestor:
 
 
 # ---------------------------------------------------------------------------
-# CLI smoke-test:  python scrapers/rss_news_ingestor.py
+# CLI smoke-test:  python scrapers/rss_news.py
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -1066,7 +1066,7 @@ if __name__ == "__main__":
     print(
         "\nTo run a live ingestion test:\n"
         "    from database.session import SessionLocal\n"
-        "    from scrapers.rss_news_ingestor import RSSNewsIngestor\n"
+        "    from scrapers.rss_news import RSSNewsIngestor\n"
         "\n"
         "    db = SessionLocal()\n"
         "    result = RSSNewsIngestor(db).ingest_feed(\n"

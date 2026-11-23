@@ -50,8 +50,7 @@ def _serialise_record(record) -> dict:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-
-@router.get(
+@router.post(
     "/",
     summary="Fetch and persist all NSE market data",
     response_description="Snapshot of all available NSE stocks",

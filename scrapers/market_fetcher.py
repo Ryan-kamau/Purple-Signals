@@ -24,9 +24,9 @@ load_dotenv()
 
 RAPIDAPI_HOST = "nairobi-stock-exchange-nse.p.rapidapi.com"
 RAPIDAPI_BASE_URL = "https://nairobi-stock-exchange-nse.p.rapidapi.com"
-RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 _DEFAULT_TIMEOUT: int = 10  # seconds
 
+RAPID_API_KEY = os.getenv("RAPID_API_KEY")
  
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,10 @@ class MarketFetcher:
     delivers them.  Callers (the service layer) own all parsing/cleaning.
  
     Environment variables expected:
-        RAPIDAPI_KEY      — your RapidAPI subscription key
-        RAPIDAPI_HOST     — e.g. "nse-stocks.p.rapidapi.com"
-        RAPIDAPI_BASE_URL — e.g. "https://nse-stocks.p.rapidapi.com"
+        RAPID_API_KEY — your RapidAPI subscription key
+
+    The host and base URL are module-level constants (RAPIDAPI_HOST,
+    RAPIDAPI_BASE_URL), not environment variables.
     """
  
  
@@ -56,7 +57,7 @@ class MarketFetcher:
  
         if not self._api_key:
             logger.warning(
-                "RAPIDAPI_KEY is not set — fetch calls will fail."
+                "RAPID_API_KEY is not set — fetch calls will fail."
             )
     
     # ------------------------------------------------------------------

@@ -10,10 +10,14 @@ Startup sequence:
 
 Run locally:
     uvicorn app.main:app --reload --port 8000
+
+Run locally (from the repo root):
+    uvicorn main:app --reload --port 8000
 """
 
 import logging
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -38,14 +42,26 @@ from scrapers.market_fetcher import MarketFetchError
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initialising database…")
+    init_db()
+    logger.info("Database ready.")
+    yield
+    # Shutdown: nothing to release yet.
+    # If you want a clean pool shutdown later: engine.dispose()
+
+
 app = FastAPI(
-    title="KPLC Intelligence Engine",
+    title="Purple Signals",
     description=(
         "Terminal-first financial intelligence system for monitoring "
-        "NSE stocks — starting with KPLC."
+        "all NSE-listed ordinary equities."
     ),
     version="0.1.0",
+    lifespan=lifespan,   # see item 6
 )
+
 @app.get("/")
 def root():
     return {
@@ -62,14 +78,6 @@ async def market_fetch_error_handler(request: Request, exc: MarketFetchError):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-def on_startup() -> None:
-    logger.info("Initialising database…")
-    init_db()
-    logger.info("Database ready.")
 
 # ---------------------------------------------------------------------------
 # Routers
@@ -90,4 +98,4 @@ app.include_router(analysis.router)
 # ---------------------------------------------------------------------------
 @app.get("/health", tags=["System"])
 def health():
-    return {"status": "ok", "service": "KPLC Intelligence Engine"}
+    return {"status": "ok", "service": "Purple Signals"}

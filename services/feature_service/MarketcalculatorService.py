@@ -59,6 +59,11 @@ Architectural note — rolling-window history source:
     process_recent() reads only the latest requested sessions plus the
     historical context needed for the longest rolling calculation.
     process_all() still reads and recomputes the complete available history.
+
+Architectural note — per-ticker column lists:
+    close/volume/raw-volatility lists are built ONCE per ticker series
+    (`_series_columns`) and passed into every `_compute_features` call, so a
+    ticker with n sessions costs O(n) list building, not O(n^2).
 """
 
 from __future__ import annotations
@@ -321,6 +326,9 @@ class MarketCalculatorService:
             logger.warning("No market data found for ticker=%s", ticker)
             return candidates, errors
 
+        # Built once per ticker, shared by every targeted index below.
+        columns = self._series_columns(series)
+
         indices = self._resolve_target_indices(series, spec)
         logger.info("Processing %s: %d trading day(s) targeted", ticker, len(indices))
 
@@ -328,7 +336,7 @@ class MarketCalculatorService:
             obs = series[idx]
 
             try:
-                values = self._compute_features(series, idx)
+                values = self._compute_features(series, idx, columns)
             except Exception as exc:  # noqa: BLE001 — isolate per-row failures
                 logger.error(
                     "Failed computing features for %s %s: %s",
@@ -430,14 +438,39 @@ class MarketCalculatorService:
     # `_next_day_target`, which is the deliberate exception).
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _series_columns(
+        series: list[DailyObservation],
+    ) -> tuple[list[float], list[float], list[Optional[float]]]:
+        """
+        Split a ticker's observation series into (closes, volumes, raw_vols)
+        column lists. Call once per ticker and reuse for every index.
+        """
+        return (
+            [obs.close_price for obs in series],
+            [obs.volume for obs in series],
+            [obs.raw_volatility for obs in series],
+        )
+
     def _compute_features(
-        self, series: list[DailyObservation], idx: int
+        self,
+        series: list[DailyObservation],
+        idx: int,
+        columns: Optional[
+            tuple[list[float], list[float], list[Optional[float]]]
+        ] = None,
     ) -> dict[str, Optional[float]]:
-        """Compute every DailyMarketFeatures-owned field for series[idx]."""
+        """
+        Compute every DailyMarketFeatures-owned field for series[idx].
+
+        `columns` is the precomputed `_series_columns(series)` tuple. It is
+        optional for backward compatibility: when omitted it is built here
+        (O(n)), so callers looping over many indices should pass it in.
+        """
         today = series[idx]
-        closes = [obs.close_price for obs in series]
-        volumes = [obs.volume for obs in series]
-        raw_vols = [obs.raw_volatility for obs in series]
+        closes, volumes, raw_vols = (
+            columns if columns is not None else self._series_columns(series)
+        )
 
         volume_ma_10 = self._sma(volumes, idx, VOLUME_MA_SHORT_WINDOW)
         volume_ma_20 = self._sma(volumes, idx, VOLUME_MA_LONG_WINDOW)

@@ -92,6 +92,7 @@ def get_news(
             "Examples: 'Reuters', 'Business Daily', 'CNBC'."
         ),
     ),
+    
     min_impact_score: Optional[int] = Query(
         default=None,
         ge=0,
@@ -187,7 +188,7 @@ def fetch_high_impact_news(
     Return the highest-impact news intelligence.
 
     Sorted by ``impact_score DESC``, then ``published_at DESC``.
-    Useful for the KPLC alert engine and macro risk dashboards.
+    Useful for the alert engine and macro risk dashboards.
     """
     try:
         return _service.get_high_impact_news(db, limit=limit)
@@ -203,7 +204,7 @@ def fetch_high_impact_news(
     summary="Return NSE-relevant intelligence",
     description=(
         "Returns headlines most likely to affect Nairobi Securities Exchange stocks. "
-        "Includes articles with impact_score >= 5 OR articles tagged with "
+        "Includes articles with impact_score >= 1 OR articles tagged with "
         "macro_economy, energy_sector, geopolitics, market_stress, or kenya_policy. "
         "Sorted by impact_score DESC, published_at DESC."
     ),
@@ -218,8 +219,8 @@ def get_nse_relevant_news(
     """
     Return news most relevant to NSE-listed stocks and the Kenyan economy.
 
-    This endpoint is the primary feed for the KPLC Intelligence Engine's
-    macro and sentiment analysis pipeline.
+    This endpoint is the primary feed for Purple Signals' macro and
+    sentiment analysis pipeline.
     """
     try:
         return _service.get_nse_relevant_news(db, page=page, page_size=page_size)

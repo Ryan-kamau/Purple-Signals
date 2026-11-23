@@ -21,9 +21,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, event, func, select  # noqa: E402
-from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.exc import IntegrityError, OperationalError  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
+
+from testers.test_db_safety import require_test_database  # noqa: E402
+
+# Validate before importing project modules or constructing an engine.
+TEST_URL = require_test_database()
 
 from api import alerts as alerts_api  # noqa: E402
 from database.base import Base  # noqa: E402
@@ -61,14 +65,7 @@ class Env:
     """Dedicated MySQL test database + project-style sessionmaker for one test."""
 
     def __init__(self) -> None:
-        url = os.environ.get("TEST_DATABASE_URL", "")
-        parsed = make_url(url) if url else None
-        if (parsed is None or parsed.get_backend_name() != "mysql"
-                or not (parsed.database or "").lower().endswith("_test")):
-            raise RuntimeError(
-                "Set TEST_DATABASE_URL to a dedicated MySQL database ending in _test "
-                "(e.g. mysql+pymysql://user:password@localhost/purple_signals_test)."
-            )
+        url = require_test_database()
         self.engine = create_engine(url, pool_pre_ping=True, isolation_level="READ COMMITTED")
         Base.metadata.drop_all(self.engine)
         Base.metadata.create_all(self.engine)

@@ -23,40 +23,17 @@ All fixture data is synthetic and fixed (reference time: Wed 2026-11-04
 
 import os
 import sys
-from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Safety guard - MUST run before any project import
 # ---------------------------------------------------------------------------
-load_dotenv()
-TEST_URL = os.getenv("TEST_DATABASE_URL") or os.environ.get("TEST_DATABASE_URL")
+from testers.test_db_safety import require_test_database
 
+TEST_URL = require_test_database()
 
-def _guard() -> None:
-    from dotenv import dotenv_values
-    from sqlalchemy.engine import make_url
+# Preserve the existing behavior: all subsequent project imports use the test DB.
+os.environ["DATABASE_URL"] = TEST_URL
 
-    if not TEST_URL:
-        print("Refusing to run: set TEST_DATABASE_URL to a DEDICATED test database.")
-        sys.exit(2)
-
-    url = make_url(TEST_URL)
-    real = os.environ.get("DATABASE_URL") or dotenv_values().get("DATABASE_URL")
-    if real and TEST_URL == real:
-        print("Refusing to run: TEST_DATABASE_URL equals DATABASE_URL.")
-        sys.exit(2)
-
-    is_sqlite = url.get_backend_name() == "sqlite"
-    if not is_sqlite and "test" not in (url.database or "").lower():
-        print(f"Refusing to run: database name {url.database!r} must contain 'test'.")
-        sys.exit(2)
-
-    # Anything in the project that builds an engine from the environment now
-    # gets the test database, regardless of what .env says.
-    os.environ["DATABASE_URL"] = TEST_URL
-
-
-_guard()
 
 from datetime import date, datetime, timedelta  # noqa: E402
 from decimal import Decimal  # noqa: E402

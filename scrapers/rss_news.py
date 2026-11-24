@@ -277,7 +277,11 @@ class RSSNewsIngestor:
         # Mirrors NewsService._store_fetch_response() Step 1.
         # Adds: keywords_detected (list), categories (list),
         #       matched_keywords_count (int), impact_score (int)
-        enriched_articles = self._keyword_engine.enrich_articles(raw_articles)
+        company_contexts = [self._relevance.detect_company_context(article)
+                            for article in raw_articles]
+        enriched_articles = self._keyword_engine.enrich_articles(
+            raw_articles, headline_tickers=[headline for headline, _ in company_contexts]
+        )
 
         logger.info(
             "RSS keyword enrichment complete: source=%s articles=%d",
@@ -289,8 +293,10 @@ class RSSNewsIngestor:
         filtered_articles: List[Dict[str, Any]] = []
         rejected_count = 0
 
-        for article in enriched_articles:
-            decision = self._relevance.evaluate(article, is_local=(region == "kenya"))
+        for article, (_, matched_tickers) in zip(enriched_articles, company_contexts):
+            decision = self._relevance.evaluate(
+                article, is_local=(region == "kenya"), matched_tickers=matched_tickers
+            )
             if not decision.keep:
                 logger.debug("RSS rejected: %r", str(article.get("title", ""))[:80])
                 rejected_count += 1

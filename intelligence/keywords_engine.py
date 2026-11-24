@@ -136,6 +136,92 @@ class KeywordEngine:
         "epra": 2,
     }
 
+    CORPORATE_KEYWORDS = {'banking_sector': ['loan growth',
+                        'non-performing loans',
+                        'interest income',
+                        'customer deposits',
+                        'bad loans'],
+     'business_expansion': ['expansion',
+                            'new subsidiary',
+                            'strategic partnership',
+                            'new investment'],
+     'corporate_actions': ['acquisition',
+                           'merger',
+                           'stake',
+                           'rights issue',
+                           'share split',
+                           'takeover'],
+     'corporate_earnings': ['profit',
+                            'net profit',
+                            'profit growth',
+                            'revenue',
+                            'earnings',
+                            'record profit',
+                            'net loss'],
+     'corporate_governance': ['ceo resignation',
+                              'board changes',
+                              'regulatory investigation',
+                              'management changes'],
+     'corporate_risk': ['fraud',
+                        'cyber security',
+                        'data breach',
+                        'restructuring',
+                        'insolvency',
+                        'default'],
+     'market_activity': ['share price',
+                         'trading volume',
+                         'market capitalization',
+                         'trading suspension',
+                         'delisting'],
+     'shareholder_returns': ['dividend',
+                             'dividend policy',
+                             'dividend cut',
+                             'special dividend',
+                             'share buyback']}
+    CORPORATE_WEIGHTS = {'acquisition': 4,
+     'bad loans': 4,
+     'board changes': 2,
+     'ceo resignation': 4,
+     'customer deposits': 2,
+     'cyber security': 2,
+     'data breach': 4,
+     'default': 5,
+     'delisting': 5,
+     'dividend': 3,
+     'dividend cut': 5,
+     'dividend policy': 3,
+     'earnings': 3,
+     'expansion': 2,
+     'fraud': 5,
+     'insolvency': 5,
+     'interest income': 3,
+     'loan growth': 3,
+     'management changes': 3,
+     'market capitalization': 2,
+     'merger': 5,
+     'net loss': 5,
+     'net profit': 4,
+     'new investment': 3,
+     'new subsidiary': 3,
+     'non-performing loans': 4,
+     'profit': 2,
+     'profit growth': 4,
+     'record profit': 5,
+     'regulatory investigation': 5,
+     'restructuring': 3,
+     'revenue': 2,
+     'rights issue': 5,
+     'share buyback': 4,
+     'share price': 2,
+     'share split': 3,
+     'special dividend': 5,
+     'stake': 2,
+     'strategic partnership': 3,
+     'takeover': 5,
+     'trading suspension': 5,
+     'trading volume': 2}
+    _CORPORATE_PATTERN = None
+
     DEFAULT_WEIGHT: int = 1
 
     # ------------------------------------------------------------------
@@ -168,11 +254,20 @@ class KeywordEngine:
         for category, keywords in cls.KEYWORDS.items():
             for kw in keywords:
                 mapping.setdefault(kw.lower(), []).append(category)
+        general_keywords = tuple(mapping)
+        for category, keywords in cls.CORPORATE_KEYWORDS.items():
+            for kw in keywords:
+                mapping.setdefault(kw, []).append(category)
         cls._KEYWORD_TO_CATEGORIES = mapping
+        # Lookahead exposes overlapping candidates at different start positions.
+        corporate = sorted(cls.CORPORATE_WEIGHTS, key=lambda k: (-len(k), k))
+        cls._CORPORATE_PATTERN = re.compile(
+            r"(?=(?<!\w)(" + "|".join(re.escape(k) for k in corporate) + r")(?!\w))"
+        ) if corporate else None
 
         # Longest-first so the regex prefers the most specific alternative.
-        singles = sorted((k for k in mapping if " " not in k), key=len, reverse=True)
-        phrases = sorted((k for k in mapping if " " in k), key=len, reverse=True)
+        singles = sorted((k for k in general_keywords if " " not in k), key=len, reverse=True)
+        phrases = sorted((k for k in general_keywords if " " in k), key=len, reverse=True)
 
         cls._SINGLE_WORD_PATTERN = (
             re.compile(r"\b(?:" + "|".join(re.escape(k) for k in singles) + r")\b")
@@ -276,7 +371,7 @@ class KeywordEngine:
 
         score: int = 0
         for kw in keywords:
-            weight = self.WEIGHTS.get(kw.lower(), self.DEFAULT_WEIGHT)
+            weight = self.CORPORATE_WEIGHTS.get(kw.lower(), self.WEIGHTS.get(kw.lower(), self.DEFAULT_WEIGHT))
             score += weight
 
         logger.debug(
@@ -301,7 +396,25 @@ class KeywordEngine:
         """
         return len(keywords)
 
-    def enrich_article(self, article: Dict[str, Any]) -> Dict[str, Any]:
+    def _corporate_matches(self, text: str) -> List[str]:
+        """Prefer longer overlapping phrases; count each distinct keyword once."""
+        if not self._CORPORATE_PATTERN:
+            return []
+        candidates = sorted(
+            ((m.start(1), m.end(1), m.group(1))
+             for m in self._CORPORATE_PATTERN.finditer(text.lower())),
+            key=lambda item: (-(item[1] - item[0]), item[0]),
+        )
+        accepted = []
+        for start, end, keyword in candidates:
+            if not any(start < b and a < end for a, b, _ in accepted):
+                accepted.append((start, end, keyword))
+        # Preserve existing general phrase semantics, e.g. profit warning.
+        general_spans = list(self._PHRASE_PATTERN.finditer(text.lower())) if self._PHRASE_PATTERN else []
+        return sorted({k for a, b, k in accepted
+                       if not any(m.start() <= a and b <= m.end() for m in general_spans)})
+
+    def enrich_article(self, article: Dict[str, Any], *, headline_tickers=()) -> Dict[str, Any]:
         """
         Enrich a single NewsAPI article dict with keyword intelligence fields.
 
@@ -355,6 +468,9 @@ class KeywordEngine:
         combined_text = self._build_combined_text(article)
 
         keywords = self.extract_keywords(combined_text)
+        if headline_tickers:
+            # Corporate scoring uses headline text only, not unrelated body text.
+            keywords = sorted(set(keywords) | set(self._corporate_matches(str(article.get("title") or ""))))
         categories = self._categories_for_keywords(keywords)
         impact_score = self.calculate_impact_score(keywords)
         keyword_count = self.count_keyword_matches(keywords)
@@ -374,7 +490,7 @@ class KeywordEngine:
             "impact_score": impact_score,
         }
 
-    def enrich_articles(self, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def enrich_articles(self, articles: List[Dict[str, Any]], *, headline_tickers=None) -> List[Dict[str, Any]]:
         """
         Enrich a batch of NewsAPI article dicts with keyword intelligence.
 
@@ -404,7 +520,13 @@ class KeywordEngine:
             )
             return []
 
-        enriched = [self.enrich_article(article) for article in articles]
+        if headline_tickers is None:
+            enriched = [self.enrich_article(article) for article in articles]
+        else:
+            if len(headline_tickers) != len(articles):
+                raise ValueError("headline_tickers must align with articles")
+            enriched = [self.enrich_article(article, headline_tickers=tickers)
+                        for article, tickers in zip(articles, headline_tickers)]
 
         total_keywords = sum(a.get("matched_keywords_count", 0) for a in enriched)
         total_impact = sum(a.get("impact_score", 0) for a in enriched)

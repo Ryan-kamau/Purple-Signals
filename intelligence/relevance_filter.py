@@ -183,11 +183,18 @@ class RelevanceFilter:
                 matches.append(ticker)
 
         return tuple(matches)
-    def evaluate(self, article: Dict[str, Any], *, is_local: bool) -> RelevanceResult:
+    def detect_company_context(self, article: Dict[str, Any]):
+        """Return headline-only and full relevance matches separately."""
+        title = str(article.get("title") or "")
+        headline = self.find_tickers(title)
+        description = self.find_tickers(str(article.get("description") or ""))
+        return headline, tuple(dict.fromkeys((*headline, *description)))
+
+    def evaluate(self, article: Dict[str, Any], *, is_local: bool, matched_tickers=None) -> RelevanceResult:
         title = str(article.get("title") or "")
         scope = f"{title} {article.get('description') or ''}"
 
-        tickers = self.find_tickers(scope)
+        tickers = self.find_tickers(scope) if matched_tickers is None else tuple(matched_tickers)
         if tickers:
             return RelevanceResult(True, "company", tickers)
 

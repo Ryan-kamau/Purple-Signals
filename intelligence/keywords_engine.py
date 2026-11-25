@@ -643,3 +643,4 @@ if __name__ == "__main__":
         print(f"  Categories : {article['categories']}")
         print(f"  KW Count   : {article['matched_keywords_count']}")
         print(f"  Impact     : {article['impact_score']}")
+        
